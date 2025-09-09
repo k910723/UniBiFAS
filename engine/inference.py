@@ -1,8 +1,3 @@
-# encoding: utf-8
-"""
-@author:  clpbc
-@contact: clpszdnb@gmail.com
-"""
 import torch
 import numpy as np
 from torch import nn
@@ -12,7 +7,7 @@ from sklearn.metrics import roc_auc_score
 
 
 from utils import AverageMeter, accuracy
-from utils.statistic import get_EER_states, get_HTER_at_thr, calculate, calculate_threshold
+from utils.statistic import get_EER_states, get_HTER_at_thr, calculate, calculate_threshold, Find_Optimal_Cutoff
 
 def do_eval(val_loader, model, device, log):
     """
@@ -32,29 +27,38 @@ def do_eval(val_loader, model, device, log):
 
     model.eval()
     with torch.no_grad():
-        for idx, (img, _, _, label) in enumerate(val_loader):
+        for idx, (img, labels) in enumerate(val_loader):
             img = img.to(device)
-            label = label.to(device)
+            labels = labels.to(device)
+            
+            # Extract binary labels (first element of hierarchical labels)
+            binary_labels = labels[:, 0]
 
-            logits, _, _, _, _ = model(img, img, img, label)#, 'test')
+            # Forward pass through the model
+            # Model returns: img_feat_norm, patch_tokens, text_feat_b, text_feat_a, text_feat_art
+            img_feat_norm, patch_tokens, text_feat_b, text_feat_a, text_feat_art = model(img)
 
-            valid_loss = criterion(logits, label)
+            # Compute logits for binary classification
+            logit_scale = model.logit_scale.exp()
+            logits = logit_scale * img_feat_norm @ text_feat_b.t()
+
+            valid_loss = criterion(logits, binary_labels)
             valid_losses.update(valid_loss.item())
 
-            acc = accuracy(logits, label, topk = (1, ))
+            acc = accuracy(logits, binary_labels, topk=(1,))
             valid_top1.update(acc[0].item())
 
-            prob = F.softmax(logits, dim = 1).cpu().data.numpy()[:, 1]
-            label = label.cpu().data.numpy()
+            # Get probabilities for the positive class (spoof/fake)
+            prob = F.softmax(logits, dim=1).cpu().data.numpy()[:, 1]
+            label = binary_labels.cpu().data.numpy()
 
             prob_list = np.append(prob_list, prob)
             label_list = np.append(label_list, label)
 
-
     auc_score = roc_auc_score(label_list, prob_list)
     cur_EER_valid, threshold, _, _ = get_EER_states(prob_list, label_list)
     ACC_threshold = calculate_threshold(prob_list, label_list, threshold)
-    cur_HTER_valid = get_HTER_at_thr(prob_list, label_list, threshold)
+    #cur_HTER_valid = get_HTER_at_thr(prob_list, label_list, threshold)
 
     fpr, tpr, thr = roc_curve(label_list, prob_list)
     tpr_filtered = tpr[fpr <= 1 / 100]
@@ -62,11 +66,14 @@ def do_eval(val_loader, model, device, log):
         rate = 0
     else:
         rate = tpr_filtered[-1]
+
+    threshold_cs, optimal_point = Find_Optimal_Cutoff(TPR=tpr, FPR=fpr, threshold=thr)
+    cur_HTER_valid = get_HTER_at_thr(prob_list, label_list, threshold_cs)
     
-    if log is not None:
-        log.write(f"TPR@FPR = {rate}\n", is_file = True)
-    else:
-        print("TPR@FPR = ", rate)
+    #if log is not None:
+    #    log.write(f"TPR@FPR = {rate}\n", is_file=True)
+    #else:
+    #    print("TPR@FPR = ", rate)
 
     return [
         valid_losses.avg, valid_top1.avg, cur_EER_valid, cur_HTER_valid,

@@ -1,31 +1,36 @@
-# encoding: utf-8
-"""
-@author:  clpbc
-@contact: clpszdnb@gmail.com
-"""
 import torch
 
 from modeling import BuildModel
 from solver import make_optimizer, create_lr_scheduler
 from data import BuildLoader
-from engine.example_trainer import do_train
+from engine.trainer import run
 import losses
 
 def train(cfg, log):
 
-    # 数据集加载
+    # Load data
     train_loader = BuildLoader(cfg, isTrain = True, log = log)
     val_loader = BuildLoader(cfg, isTrain = False, log = log)
-    
+
+    # Instantiate the model
     device = torch.device(cfg['device'] if torch.cuda.is_available() else "cpu")
     model = BuildModel(cfg).to(device)
 
-    criterion = {'loss_1': losses.__dict__[cfg['loss_1']['name']](**cfg['loss_1']['params']), 'loss_2': losses.__dict__[cfg['loss_2']['name']](device = device, **cfg['loss_2']['params']), 'loss_3': losses.__dict__[cfg['loss_3']['name']](**cfg['loss_3']['params'])}
+    # Check which parameters are trainable
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model created. Trainable parameters: {trainable_params}")
+    print("Trainable parameters should only be in the HierarchicalPromptLearner.")
 
-    
+    criterion = {
+        'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b']['params']),
+        'cls_a': getattr(torch.nn, cfg['losses']['cls_a']['name'])(**cfg['losses']['cls_a']['params']),
+        'cls_art': getattr(torch.nn, cfg['losses']['cls_art']['name'])(**cfg['losses']['cls_art']['params']),
+        'seg': getattr(torch.nn, cfg['losses']['seg']['name'])(**cfg['losses']['seg']['params'])
+    }
+
     optimizer = make_optimizer(cfg, model, log)
     scheduler = create_lr_scheduler(optimizer, **cfg['scheduler']['params'])
-    scaler = torch.cuda.amp.GradScaler() if cfg['train']['amp'] else None
+    scaler = torch.amp.GradScaler('cuda') if cfg['train']['amp'] else None
 
     # Load if checkpoint is provided
     if cfg['ckpt']:
@@ -44,7 +49,7 @@ def train(cfg, log):
         log.write(f'\nStarting training from epoch {epoch} at iteration : {iter_num_start}\n', is_file = 1)
 
 
-    hter, auc, tpr_fpr = do_train(
+    hter, auc, tpr_fpr = run(
         cfg,
         model,
         train_loader,
@@ -60,4 +65,3 @@ def train(cfg, log):
     )
 
     return hter, auc, tpr_fpr
-

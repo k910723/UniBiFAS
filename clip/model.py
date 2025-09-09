@@ -2,10 +2,9 @@ from collections import OrderedDict
 from typing import Tuple, Union
 
 import numpy as np
-import torch, math
+import torch
 import torch.nn.functional as F
 from torch import nn
-
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -178,42 +177,115 @@ class ResidualAttentionBlock(nn.Module):
         self.ln_2 = LayerNorm(d_model)
         self.attn_mask = attn_mask
 
-    def attention(self, x: torch.Tensor, key_padding_mask = None):
+    def attention(self, x: torch.Tensor):
         self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
-        key_padding_mask = key_padding_mask.to(dtype = x.dtype, device = x.device) if key_padding_mask is not None else None
-        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask, key_padding_mask = key_padding_mask)[0]
+        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
 
-    def forward(self, x: torch.Tensor, key_padding_mask = None):
-        x = x + self.attention(self.ln_1(x), key_padding_mask)
+    def forward(self, x: torch.Tensor):
+        x = x + self.attention(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
 
+class ResidualAttentionBlock_UniBiFAS(nn.Module):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, add_prompt=False,
+                 text_layer=False, i=0, design_details=None):
+        super().__init__()
+
+        self.attn = nn.MultiheadAttention(d_model, n_head)
+        self.ln_1 = LayerNorm(d_model)
+        self.mlp = nn.Sequential(OrderedDict([
+            ("c_fc", nn.Linear(d_model, d_model * 4)),
+            ("gelu", QuickGELU()),
+            ("c_proj", nn.Linear(d_model * 4, d_model))
+        ]))
+        self.ln_2 = LayerNorm(d_model)
+        # Only add learnable tokens if flag is set True
+        # For the first iteration i, we should not add the learnable parameters
+        # as it has already been taken care of in the very start, for both text and the visual branch
+        self.text_layer = text_layer
+        self.attn_mask = attn_mask
+        self.cross_prompt_nctx = design_details['vision_ctx']
+        self.i = i
+        if self.i != 0:
+            self.add_prompt = add_prompt
+        else:
+            self.add_prompt = False
+
+    def attention(self, x: torch.Tensor):
+        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
+        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
+
+    def forward(self, inputs):
+        x = inputs[0]
+        cross_prompts_deeper = inputs[1]
+
+        # Will need to append the learnable tokens for this layer here
+        # Check if flag was set for this layer or not
+        if self.add_prompt:  # Depending on the hyper-parameter K, self.add_prompt is set to True when i < K ,
+            # Also see if this is textual transformer layer or not
+            if not self.text_layer:  # visual
+                # Remove the outputs produced by learnable tokens of previous layer
+                prefix = x[0:x.shape[0] - self.cross_prompt_nctx, :, :]
+                # Create/configure learnable tokens of this layer
+                visual_context = cross_prompts_deeper[self.i-1]
+                visual_context = visual_context.expand(x.shape[1], -1, -1).permute(1, 0, 2)
+                # Concat the learnable tokens of this layer with the input
+                x = torch.cat([prefix, visual_context], dim=0)
+            else:  # text
+                # Appending the learnable tokens in different way
+                # x -> [77, NCLS, DIM]
+                # First remove the learnable tokens from previous layer
+                prefix = x[:1, :, :]
+                suffix = x[1 + self.cross_prompt_nctx:, :, :]
+                # Create/configure learnable tokens of this layer
+                textual_context = cross_prompts_deeper[self.i-1]
+                textual_context = textual_context.expand(x.shape[1], -1, -1).permute(1, 0, 2)
+                # Concat the learnable tokens of this layer with the input
+                x = torch.cat([prefix, textual_context, suffix], dim=0)
+        x = x + self.attention(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return [x, cross_prompts_deeper]
 
 class Transformer(nn.Module):
-    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None):
+    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, prompts_needed=0, text_layer=False, design_details=None):
         super().__init__()
         self.width = width
         self.layers = layers
-        self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask) for _ in range(layers)])
+        # The fourth parameter indicates whether a prompt needs to be added (true or false)
+        self.resblocks = nn.Sequential(*[ResidualAttentionBlock_UniBiFAS(width, heads, attn_mask, True, text_layer, i, design_details) if prompts_needed > i
+                                    else ResidualAttentionBlock_UniBiFAS(width, heads, attn_mask, False, text_layer, i, design_details) for i in range(layers)])
 
     def forward(self, x: torch.Tensor):
         return self.resblocks(x)
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, config = None):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,
+                 output_dim: int, design_details):
         super().__init__()
         self.input_resolution = input_resolution
         self.output_dim = output_dim
-        self.config = config
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
-
+        if design_details["vision_depth"] == 0:
+            self.VPT_shallow = False
+        else:
+            self.VPT_shallow = True
+        if self.VPT_shallow:
+            # Add visual prompt tokens here
+            n_ctx = design_details["vision_ctx"]  # hyperparameter
+            ctx_vectors = torch.empty(n_ctx, width)
+            nn.init.normal_(ctx_vectors, std=0.02)
+            self.VPT = nn.Parameter(ctx_vectors)
+            # self.VPT.half()
         scale = width ** -0.5
         self.class_embedding = nn.Parameter(scale * torch.randn(width))
         self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
         self.ln_pre = LayerNorm(width)
-        
-        self.transformer = Transformer(width, layers, heads)
+        # hyper-parameter if need to add prompt embeddings inside to the input
+        # of transformer block or not:
+        self.prompt_till_layer_visual = design_details["vision_depth"]
+        self.transformer = Transformer(width, layers, heads, prompts_needed=self.prompt_till_layer_visual,
+                                       design_details=design_details)
 
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
@@ -222,8 +294,21 @@ class VisionTransformer(nn.Module):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
-        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+        x = torch.cat(
+            [self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype,
+                                                            device=x.device),
+             x], dim=1)  # shape = [*, grid ** 2 + 1, width]
         x = x + self.positional_embedding.to(x.dtype)
+
+        # After positional embeddings, we will attach prompts with the model, remember only those
+        # are trainable parameters here in whole image encoder.
+        if self.VPT_shallow:
+            visual_ctx = self.VPT.expand(x.shape[0], -1, -1)
+            x = torch.cat([x, visual_ctx], dim=1)
+        else:
+            assert self.prompt_till_layer_visual == 0
+
+        # Normal code as before
         x = self.ln_pre(x)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
@@ -256,6 +341,53 @@ class VisionTransformer(nn.Module):
 
         return x , x_proj
         
+class VisionTransformer_UniBiFAS(nn.Module):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,
+                 output_dim: int, design_details):
+        super().__init__()
+        self.input_resolution = input_resolution
+        self.output_dim = output_dim
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
+        self.VPT_shallow = True
+        scale = width ** -0.5
+        self.class_embedding = nn.Parameter(scale * torch.randn(width))
+        self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
+        self.ln_pre = LayerNorm(width)
+        # hyper-parameter if need to add prompt embeddings inside to the input
+        # of transformer block or not:
+        self.prompt_till_layer_visual = design_details["vision_depth"]
+        self.transformer = Transformer(width, layers, heads, prompts_needed=self.prompt_till_layer_visual,
+                                       design_details=design_details)
+
+        self.ln_post = LayerNorm(width)
+        self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
+
+    def forward(self, x: torch.Tensor, img_prompts, cross_prompts_visual_deeper):
+        x = self.conv1(x)  # shape = [*, width, grid, grid]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+        x = x + self.positional_embedding.to(x.dtype)
+        # After positional embeddings, we will attach prompts with the model, remember only those are trainable parameters here in whole image encoder.
+        if self.VPT_shallow:
+            visual_ctx = img_prompts.expand(x.shape[0], -1, -1)
+            x = torch.cat([x, visual_ctx], dim=1)
+        else:
+            assert self.prompt_till_layer_visual == 0
+
+        # Normal code as before
+        x = self.ln_pre(x)
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        outputs = self.transformer([x, cross_prompts_visual_deeper])
+        x = outputs[0]
+        x = x.permute(1, 0, 2)  # LND -> NLD
+
+        x = self.ln_post(x[:, 0, :])
+
+        if self.proj is not None:
+            x = x @ self.proj
+
+        return x
 
 class CLIP(nn.Module):
     def __init__(self,
@@ -271,12 +403,12 @@ class CLIP(nn.Module):
                  transformer_width: int,
                  transformer_heads: int,
                  transformer_layers: int,
-                 config = None
+                 design_details
                  ):
         super().__init__()
 
         self.context_length = context_length
-        self.config = config
+        trainer = design_details['trainer']
 
         if isinstance(vision_layers, (tuple, list)):
             vision_heads = vision_width * 32 // 64
@@ -289,24 +421,27 @@ class CLIP(nn.Module):
             )
         else:
             vision_heads = vision_width // 64
+            if trainer == "UniBiFAS":
+                self.visual = VisionTransformer_UniBiFAS(
+                    input_resolution=image_resolution,
+                    patch_size=vision_patch_size,
+                    width=vision_width,
+                    layers=vision_layers,
+                    heads=vision_heads,
+                    output_dim=embed_dim,
+                    design_details=design_details,
+                )        
 
-            self.visual = VisionTransformer(
-                    input_resolution = image_resolution,
-                    patch_size = vision_patch_size,
-                    width  = vision_width,
-                    layers = vision_layers,
-                    heads = vision_heads,
-                    output_dim = embed_dim,
-                    config = self.config
-                )
-            
+        prompt_till_layer_text = design_details['language_depth']
         self.transformer = Transformer(
             width = transformer_width,
             layers = transformer_layers,
             heads = transformer_heads,
-            attn_mask = self.build_attention_mask()
+            attn_mask = self.build_attention_mask(),
+            prompts_needed=prompt_till_layer_text,
+            text_layer=True,
+            design_details=design_details
         )
-
 
         self.vocab_size = vocab_size
         self.token_embedding = nn.Embedding(vocab_size, transformer_width)
@@ -360,24 +495,20 @@ class CLIP(nn.Module):
         return self.visual.conv1.weight.dtype
 
     def encode_image(self, image):
-        return self.visual(image.type(self.dtype))    #  transformer中添加learnable token
+        return self.visual(image.type(self.dtype))
 
     def encode_text(self, text):
         x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
 
         x = x + self.positional_embedding.type(self.dtype)
-        # if self.design_details:
-            # learnable_lang_token = torch.randn((self.design_details))
-
-
         x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)  
+        x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), text.argmax(dim = -1)] @ self.text_projection
+        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
 
         return x
 
@@ -397,284 +528,31 @@ class CLIP(nn.Module):
         # shape = [global_batch_size, global_batch_size]
         return logits_per_image, logits_per_text
 
-
-class text2image_attention_transform(nn.Module):
-    def __init__(self):    
-        super().__init__()
-        self.fc = nn.Linear(512, 768)  # Adjust the dimension from 512 to 768
-        r = 4
-        self.ln = nn.LayerNorm(768)
-        self.mlp = nn.Sequential(
-            nn.Linear(768, 768 // r), 
-            nn.ReLU(),
-            nn.Linear(768 // r, 768), 
-        )
-
-    # def forward(self, vision_prompt, text_prompt):
-    #     #affinities = torch.einsum('nc,nl->cl', vision_prompt, text_prompt)/math.sqrt(text_prompt.shape[-2])
-    #     #return torch.einsum('cl,nl->nc', affinities, text_prompt)
-    #     transformed_prompt = self.fc(text_prompt)
-    #     affinities = F.softmax(torch.einsum('nc,mc->nm', vision_prompt, transformed_prompt)/math.sqrt(transformed_prompt.shape[-1]), -1)
-    #     return self.mlp(self.ln(torch.einsum('nm,mc->nc', affinities, transformed_prompt)))
-
-    def forward(self, vision_prompt, text_prompt):
-        mean_vision_prompt = torch.mean(vision_prompt, dim = 1)
-        mean_text_prompt = torch.mean(text_prompt, dim = 1)
-
-        transformed_prompt = self.fc(mean_text_prompt)
-        affinities = F.softmax(torch.einsum('nc, mc -> nm', mean_vision_prompt, transformed_prompt) / math.sqrt(transformed_prompt.shape[-1]), -1)
-        aug_image_feat = self.mlp(self.ln(torch.einsum('nm, mc -> nc', affinities, transformed_prompt)))
-        return aug_image_feat.unsqueeze(1).expand(-1, vision_prompt.shape[1], -1)
-
-
-class image2text_attention_transform(nn.Module):
-    def __init__(self):    
-        super().__init__()
-        self.fc = nn.Linear(768, 512)  # Adjust the dimension from 768 to 512
-        r = 4
-        self.ln = nn.LayerNorm(512)
-        self.mlp = nn.Sequential(
-            nn.Linear(512, 512 // r), 
-            nn.ReLU(),
-            nn.Linear(512 // r, 512), 
-        )
-
-    def forward(self, text_prompt, vision_prompt):
-        mean_vision_prompt = torch.mean(vision_prompt, dim = 1)
-        mean_text_prompt = torch.mean(text_prompt, dim = 1)
-
-        transformed_prompt = self.fc(mean_vision_prompt)
-        affinities = F.softmax(torch.einsum('nc,mc->nm', mean_text_prompt, transformed_prompt) / math.sqrt(transformed_prompt.shape[-1]), -1)
-        aug_text_feat = self.mlp(self.ln(torch.einsum('nm,mc->nc', affinities, transformed_prompt)))
-        return aug_text_feat.unsqueeze(1).expand(-1, text_prompt.shape[1], -1)
-
-
-class CLIP_MEFas(nn.Module):
-    def __init__(self,
-                 embed_dim: int,
-                 # vision
-                 image_resolution: int,
-                 vision_layers: Union[Tuple[int, int, int, int], int],
-                 vision_width: int,
-                 vision_patch_size: int,
-                 # text
-                 context_length: int,
-                 vocab_size: int,
-                 transformer_width: int,
-                 transformer_heads: int,
-                 transformer_layers: int,
-                 config = None
-                 ):
-        super().__init__()
-
-        self.context_length = context_length
-        self.config = config
-        self.nctx = self.config['model']['nctx']
-        self.prompt_depth = self.config['model']['prompt_depth']
-
-        vision_heads = vision_width // 64
-
-        self.visual = VisionTransformer(
-            input_resolution = image_resolution,
-            patch_size = vision_patch_size,
-            width = vision_width,
-            layers = vision_layers,
-            heads = vision_heads,
-            output_dim = embed_dim,
-        )
-            
-        self.transformer = Transformer(
-            width = transformer_width,
-            layers = transformer_layers,
-            heads = transformer_heads,
-            attn_mask = self.build_attention_mask(),
-        )
-
-        # self.prompt_projections_image = nn.ModuleList([text2image_attention_transform() for _ in range(self.prompt_depth - 1)])
-        self.image_projections_prompt = nn.ModuleList([image2text_attention_transform() for _ in range(self.prompt_depth - 1)])
-        self.text_projection_image = nn.Parameter(torch.empty(transformer_width, vision_width))
-
-        self.vocab_size = vocab_size
-        self.token_embedding = nn.Embedding(vocab_size, transformer_width)
-        self.positional_embedding = nn.Parameter(torch.empty(self.context_length, transformer_width))
-        self.ln_final = LayerNorm(transformer_width)
-
-        self.text_projection = nn.Parameter(torch.empty(transformer_width, embed_dim))
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-
-        self.initialize_parameters()
-
-    def initialize_parameters(self):
-        nn.init.normal_(self.token_embedding.weight, std=0.02)
-        nn.init.normal_(self.positional_embedding, std=0.01)
-
-        proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.layers) ** -0.5)
-        attn_std = self.transformer.width ** -0.5
-        fc_std = (2 * self.transformer.width) ** -0.5
-        for block in self.transformer.resblocks:
-            nn.init.normal_(block.attn.in_proj_weight, std=attn_std)
-            nn.init.normal_(block.attn.out_proj.weight, std=proj_std)
-            nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
-            nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
-
-        if self.text_projection is not None:
-            nn.init.normal_(self.text_projection, std=self.transformer.width ** -0.5)
-
-        if self.text_projection_image is not None:
-            nn.init.normal_(self.text_projection_image, std = self.transformer.width ** -0.5)
-
-    def build_attention_mask(self):
-        # lazily create causal attention mask, with full attention between the vision tokens
-        # pytorch uses additive attention mask; fill with -inf
-        mask = torch.empty(self.context_length, self.context_length)
-        mask.fill_(float("-inf"))
-        mask.triu_(1)  # zero out the lower diagonal
-        return mask
-
-    @property
-    def dtype(self):
-        return self.visual.conv1.weight.dtype
-
-    def encode_image(self, image):
-        return self.visual(image.type(self.dtype)) 
-
-    def encode_text(self, text):
-        x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
-
-        x = x + self.positional_embedding.type(self.dtype)
-        
-        x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)  
-        x = x.permute(1, 0, 2)  # LND -> NLD
-        x = self.ln_final(x).type(self.dtype)
-
-        # x.shape = [batch_size, n_ctx, transformer.width]
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), text.argmax(dim = -1)] @ self.text_projection
-
-        return x
-
-    def forward(self, image, prompts, shared_ctx, tokenized_prompts, labels, Type = 'train'):
-        ### text brunch
-        text_embed = prompts + self.positional_embedding.type(self.dtype)
-        text_embed = text_embed.permute(1, 0, 2)
-
-        # text_deeper_prompt = nn.ParameterList([nn.Parameter(torch.empty(self.nctx, 512)) for _ in range(self.prompt_depth - 1)])
-
-        # for single_para in text_deeper_prompt:
-        #     nn.init.normal_(single_para, std=0.02)
-        ###
-
-        ### image brunch
-        x = self.visual.conv1(image)
-
-        x = x.reshape(x.shape[0], x.shape[1], -1)
-        x = x.permute(0, 2, 1)
-
-        x = torch.cat([self.visual.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype = x.dtype, device = x.device), x], dim = 1)
-        x += self.visual.positional_embedding.to(x.dtype)
-
-        visual_ctx = shared_ctx.expand(x.shape[0], -1, -1)
-        x = torch.cat([x, visual_ctx], dim = 1)
-
-        x = self.visual.ln_pre(x)
-        img_embed = x.permute(1, 0, 2)
-
-        vision_deeper_prompt = nn.ParameterList([nn.Parameter(torch.empty(self.nctx, 768)) for _ in range(self.prompt_depth - 1)])
-
-        for single_para in vision_deeper_prompt:
-            nn.init.normal_(single_para, std = 0.02)
-        ###
-
-
-        for idx, _ in enumerate(self.transformer.resblocks):
-            vision_mask = torch.zeros(size = (img_embed.size(1), img_embed.size(0)))
-            if Type == 'train' and idx < self.config['mask']['depth'] and self.config['mask']['mode'] == 'random_location':
-                
-                text_cls_token = text_embed[tokenized_prompts.argmax(dim = -1), torch.arange(text_embed.size(1))] @ self.text_projection_image
-
-                for i in range(len(labels)):
-                    sim = text_cls_token @ img_embed[: 197, i].T
-                    row_index = torch.argmin(sim[:, 0])
-                    selected_row = sim[row_index, 1: ]
-
-                    row_mask = torch.zeros(size = (196, ))
-                    indices = torch.topk(selected_row, int(196 * self.config['mask']['ratio']), largest = False).indices
-                    row_mask[indices] = 1
-
-                    random_row_mask = torch.zeros(size = (196, ))
-                    random_row_mask[: int(196 * self.config['mask']['ratio'])] = 1
-                    j = torch.randperm(196)
-
-                    # vision_mask[i, 1: 197] = row_mask.to(torch.int) & random_row_mask[j].to(torch.int)
-                    vision_mask[i, 1: 197] = row_mask.to(torch.int) | random_row_mask[j].to(torch.int)
-                    # vision_mask[i, 1: 197] = row_mask.to(torch.int)
-
-
-            text_embed = self.transformer.resblocks[idx](text_embed)
-            img_embed = self.visual.transformer.resblocks[idx](img_embed, vision_mask)
-
-            if idx < self.prompt_depth - 1:
-                text_prefix = text_embed[: 1]
-                text_suffix = text_embed[1 + self.nctx: ]
-                textual_context = text_embed[1: 1 + self.nctx]
-
-                vision_prefix = img_embed[: -1 * self.nctx]
-                vision_context = img_embed[-1 * self.nctx: ]
-
-                aug_textual_context = self.image_projections_prompt[idx](textual_context, vision_context)
-                # aug_textual_context = text_deeper_prompt[idx].to(self.config['device'])
-                # aug_textual_context = aug_textual_context.unsqueeze(1).expand(-1, text_prefix.shape[1], -1)
-
-                # aug_vision_context = self.prompt_projections_image[idx](vision_context, textual_context)
-                aug_vision_context = vision_deeper_prompt[idx].to(self.config['device'])
-                aug_vision_context = aug_vision_context.unsqueeze(1).expand(-1, vision_prefix.shape[1], -1)
-
-                text_embed = torch.cat([text_prefix, aug_textual_context, text_suffix], dim = 0)
-                img_embed = torch.cat([vision_prefix, aug_vision_context], dim = 0)
-
-        
-        ### image brunch
-        x = img_embed.permute(1, 0, 2)
-        x = self.visual.ln_post(x[:, 0, :])
-
-        img_proj = x @ self.visual.proj
-        ###
-
-        ### text brunch
-        text_embed = text_embed.permute(1, 0, 2)
-        texg_embed = self.ln_final(text_embed)
-        text_embed = text_embed[torch.arange(text_embed.shape[0]), tokenized_prompts.argmax(dim = -1)] @ self.text_projection
-        ###
-
-        return img_proj, text_embed
-
-
 def convert_weights(model: nn.Module):
     """Convert applicable model parameters to fp16"""
 
     def _convert_weights_to_fp16(l):
         if isinstance(l, (nn.Conv1d, nn.Conv2d, nn.Linear)):
-            l.weight.data = l.weight.data.half()
+            l.weight.data = l.weight.data
             if l.bias is not None:
-                l.bias.data = l.bias.data.half()
+                l.bias.data = l.bias.data
 
         if isinstance(l, nn.MultiheadAttention):
             for attr in [*[f"{s}_proj_weight" for s in ["in", "q", "k", "v"]], "in_proj_bias", "bias_k", "bias_v"]:
                 tensor = getattr(l, attr)
                 if tensor is not None:
-                    tensor.data = tensor.data.half()
+                    tensor.data = tensor.data
 
         for name in ["text_projection", "proj"]:
             if hasattr(l, name):
                 attr = getattr(l, name)
                 if attr is not None:
-                    attr.data = attr.data.half()
+                    attr.data = attr.data
 
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict, config = None):    
+def build_model(state_dict: dict, design_details):    
     
     vit = "visual.proj" in state_dict
 
@@ -700,25 +578,21 @@ def build_model(state_dict: dict, config = None):
     transformer_heads = transformer_width // 64  # 8
     transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith(f"transformer.resblocks")))  # 12
 
-    if config and config['model']['mode'] == 'mefas':
-        model = CLIP_MEFas(
-            embed_dim,
-            image_resolution, vision_layers, vision_width, vision_patch_size,
-            context_length, vocab_size, transformer_width, transformer_heads, transformer_layers, config
-        )
-
-    else:
-        model = CLIP(
-            embed_dim,
-            image_resolution, vision_layers, vision_width, vision_patch_size,
-            context_length, vocab_size, transformer_width, transformer_heads, transformer_layers, config
-        )
+    model = CLIP(
+        embed_dim,
+        image_resolution, vision_layers, vision_width, vision_patch_size,
+        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers, design_details
+    )
     # (512, 224, 12, 768, 16, 77, 49408, 512, 8, 12)
 
-    for key in ["input_resolution", "context_length", "vocab_size", 'learnable_token']:
+    for key in ["input_resolution", "context_length", "vocab_size"]:
         if key in state_dict:
             del state_dict[key]
 
-    # convert_weights(model)
-    model.load_state_dict(state_dict, strict = False)
+    convert_weights(model)
+    try:
+        model.load_state_dict(state_dict)
+    except:
+        missing_keys, _ = model.load_state_dict(state_dict, strict=False)
+        print('Weights not found for some missing keys: ', missing_keys)
     return model.eval()

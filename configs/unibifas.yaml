@@ -1,0 +1,89 @@
+base:
+    repeat_num: 1
+
+dataset:
+    root_path: '/shared/shared/FAS_AUG'
+    test_path: '/shared/shared'
+    source: 'c'    # c, i, o, m, ci, ..., cio, ..., ciom
+    target: 'i'    # c, i, o, m, ci, ..., cio, ..., ciom
+    batch_size: 32
+    num_workers: 8
+    classnames:
+        - 'a photo of a real face'
+        - 'a photo of a spoof face'
+    # Hierarchical classification labels
+    attack_types:
+        - 'a photo of a real face'
+        - 'a photo of a print attack'
+        - 'a photo of a replay attack'
+    artifact_types:
+        - 'a photo of real face'
+        - 'a photo of a spoof face with bnhalftone artifact'
+        - 'a photo of a spoof face with distortion artifact'
+        - 'a photo of a spoof face with sfchalftone artifact'
+        - 'a photo of a spoof face with moire pattern artifact'
+        - 'a photo of a spoof face with reflection artifact'
+
+transforms:
+    imgSize: 224
+    mean:
+        - 0.535
+        - 0.419
+        - 0.358
+    std:
+        - 0.276
+        - 0.251
+        - 0.242
+
+model:
+    mode: mefas 
+    backbone: ViT-B/16
+    n_ctx: 4                     # Number of learnable tokens per prompt
+    prompt_depth: 12             # Max 12, Min 1 ,for 1 it will act asa shallow MaPLe (J = 1)
+    interaction_layers: [4, 8]   # Layers 0-3: V->T, 4-7: V<->T, 8-11: T->V
+
+train:
+    iters: 40000
+    iter_per_epoch: 100
+    print_interval: 100
+    amp: True
+
+optimizer:
+  name: Adam
+  params:
+    lr: 1.0e-6
+    weight_decay: 1.0e-6
+
+scheduler:
+    params:
+        use: False
+        step_each_epoch: 100
+        total_epochs: 50
+        warmup: True
+        warmup_epochs: 2
+        warmup_factor: 1.0e-3
+
+loss_weights:
+    binary: 1.0
+    attack: 0.5
+    artifact: 0.3
+    segmentation: 0.5
+
+losses:
+    cls_b:
+        name: CrossEntropyLoss
+        params:
+            reduction: mean
+    cls_a:
+        name: CrossEntropyLoss
+        params:
+            reduction: mean
+    cls_art:
+        name: CrossEntropyLoss
+        params:
+            reduction: mean
+    seg:
+        name: L1Loss
+        params:
+            reduction: mean
+        

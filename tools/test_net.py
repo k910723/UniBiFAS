@@ -14,7 +14,7 @@ import torch
 sys.path.append('.')
 from config import cfg
 from data import BuildLoader
-from engine.example_inference import inference
+from UniBiFAS.engine.inference import inference
 from modeling import build_model
 from utils.logger import setup_logger
 

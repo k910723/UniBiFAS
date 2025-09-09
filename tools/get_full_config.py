@@ -1,9 +1,3 @@
-# encoding: utf-8
-"""
-@author:  clpbc
-@contact: clpszdnb@gmail.com
-"""
-
 import sys, yaml, json
 from datetime import datetime
 

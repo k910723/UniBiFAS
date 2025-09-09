@@ -1,15 +1,6 @@
-# encoding: utf-8
-"""
-@author:  clpbc
-@contact: clpszdnb@gmail.com
-"""
-
-from .mefas import MEFas
-
+from .unibifas import UniBiFAS_Model
 
 def BuildModel(cfg):
-
-    model = MEFas(cfg)
-
+    model = UniBiFAS_Model(cfg)
     return model
 

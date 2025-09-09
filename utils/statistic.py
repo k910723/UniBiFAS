@@ -81,3 +81,19 @@ def get_HTER_at_thr(probs, labels, thr):
   HTER = (FAR + FRR) / 2.0
   return HTER
 
+def Find_Optimal_Cutoff(TPR, FPR, threshold):
+    # Youden's J statistic: J = TPR + TNR - 1 = TPR + (1 - FPR)
+    y = TPR + (1 - FPR)
+    # print(y)
+    Youden_index = np.argmax(y)  # Only the first occurrence is returned.
+    optimal_threshold = threshold[Youden_index]
+    point = [FPR[Youden_index], TPR[Youden_index]]
+    
+    # Debug: Check if we get reasonable HTER at this point
+    # At optimal Youden point: HTER = (FPR + FNR) / 2 = (FPR + (1-TPR)) / 2
+    theoretical_hter = (FPR[Youden_index] + (1 - TPR[Youden_index])) / 2.0
+    if theoretical_hter > 0.5:
+        print(f"Warning: Theoretical HTER at Youden point is {theoretical_hter:.4f} > 0.5")
+        print(f"This suggests a label/probability mismatch. TPR={TPR[Youden_index]:.4f}, FPR={FPR[Youden_index]:.4f}")
+    
+    return optimal_threshold, point

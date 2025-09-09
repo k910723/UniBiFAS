@@ -1,9 +1,3 @@
-# encoding: utf-8
-"""
-@author:  clpbc
-@contact: clpszdnb@gmail.com
-"""
-
 import yaml, os, torch, random, shutil, warnings
 import numpy as np
 
@@ -21,28 +15,8 @@ if __name__ == '__main__':
     expSavePath = os.path.join(cfg['op_dir'], cfg['exp_name'])
     if not os.path.exists(expSavePath):
         os.makedirs(expSavePath, exist_ok = True)
-    
 
-    ### 备份当前运行code
-    rootPath = r'./'
-    for item in os.listdir(rootPath):
-        if item in ['op_dir', 'new_template.ipynb', 'scripts']:
-            continue
-
-        srcPath = os.path.join(rootPath, item)
-        desPath = os.path.join(expSavePath, 'code', item)
-        
-        # 复制文件或目录
-        if os.path.isdir(srcPath):
-            shutil.copytree(srcPath, desPath, dirs_exist_ok = True)
-        else:
-            shutil.copy2(srcPath, desPath)
-    
-    print(f"Backup of '{srcPath}' completed to '{desPath}'.")
-    ### 
-
-
-    ### 保存当前config
+    ### save current config
     cfgName = f"{cfg['exp_name']}.yaml"
     cfgSavePath = os.path.join(expSavePath, cfgName)
 
@@ -51,7 +25,7 @@ if __name__ == '__main__':
     ###
 
 
-    ### 保存当前log文件与result文件
+    ### save current log and result files
     logName = f"{cfg['exp_name']}_log.txt"
     logSavePath = os.path.join(expSavePath, logName)
     log = Logger()
@@ -66,7 +40,7 @@ if __name__ == '__main__':
     hter_avg, auc_avg, tpr_fpr_avg = [], [], []
 
     for i in range(cfg['base']['repeat_num']):
-        # To reproduce results 
+        # To reproduce results
         torch.manual_seed(i)
         np.random.seed(i)
         random.seed(i)
