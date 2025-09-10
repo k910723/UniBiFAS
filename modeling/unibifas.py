@@ -315,6 +315,10 @@ class UniBiFAS_Model(nn.Module):
         # Projection layer for patch tokens to match text feature dimension
         # Vision features: 768, Text features: 512
         self.patch_projection = nn.Linear(768, 512)
+
+        self.low_cls_projection = nn.Linear(768, 512)
+        self.mid_cls_projection = nn.Linear(768, 512)
+        self.high_cls_projection = nn.Linear(768, 512)
         
         # Define interaction layers for patch token extraction
         # Convert from 1-based config indices to 0-based Python indices
@@ -323,6 +327,7 @@ class UniBiFAS_Model(nn.Module):
         
         # Store intermediate features during forward pass
         self.patch_tokens_cache = {}
+        self.cls_tokens_cache = {}
         
         # Register hooks to extract patch tokens from specific layers
         self._register_hooks()
@@ -355,7 +360,7 @@ class UniBiFAS_Model(nn.Module):
                     end_idx = feature_tensor.shape[0] - num_prompt_tokens  # 201 - 4 = 197
                     patch_only = feature_tensor[1:end_idx, :, :]  # [196, batch, 768] 
                     self.patch_tokens_cache[layer_idx] = patch_only.permute(1, 0, 2)  # [batch, 196, 768]
-                
+                    self.cls_tokens_cache[layer_idx] = feature_tensor[0, :, :].unsqueeze(1)  # [batch, 1, 768]
                 # IMPORTANT: Always return the original, unmodified output
                 return output
             
@@ -370,7 +375,8 @@ class UniBiFAS_Model(nn.Module):
     def forward(self, image):
         # Clear previous cache
         self.patch_tokens_cache = {}
-        
+        self.cls_tokens_cache = {}
+
         # Get the updated, cross-modally refined prompts for multiple tasks
         (text_prompts_binary, text_prompts_attack, text_prompts_artifact,
          shallow_v_prompt, deep_t_prompts, deep_v_prompts,
@@ -406,6 +412,34 @@ class UniBiFAS_Model(nn.Module):
         # Project patch tokens to match text feature dimension (768 -> 512)
         patch_tokens = self.patch_projection(patch_tokens)
 
+        # Get cls tokens from all three layers
+        cls_tokens_list = []
+        for layer_idx in target_layers:
+            if layer_idx in self.cls_tokens_cache:
+                cls_tokens_list.append(self.cls_tokens_cache[layer_idx])
+            else:
+                # Fallback: create dummy cls token if hook didn't work
+                print(f"Warning: CLS token not found from layer {layer_idx}. Using zeros.")
+                batch_size = image.shape[0]
+                hidden_dim = 768
+                dummy_cls = torch.zeros(batch_size, 1, hidden_dim, 
+                                       device=image.device, dtype=image.dtype)
+                cls_tokens_list.append(dummy_cls)
+
+        # Stack cls tokens from all layers
+        cls_tokens = torch.cat(cls_tokens_list, dim=1)
+        # Project each CLS token separately using the appropriate projection
+        cls_tokens_projected = torch.zeros(cls_tokens.shape[0], cls_tokens.shape[1], 512,
+                                  device=cls_tokens.device, dtype=cls_tokens.dtype)
+        
+        # Apply separate projections to each layer's CLS token
+        cls_tokens_projected[:,0,:] = self.low_cls_projection(cls_tokens[:,0,:])
+        cls_tokens_projected[:,1,:] = self.mid_cls_projection(cls_tokens[:,1,:])
+        cls_tokens_projected[:,2,:] = self.high_cls_projection(cls_tokens[:,2,:])
+        
+        # Normalize each cls token
+        cls_tokens = cls_tokens_projected / cls_tokens_projected.norm(dim=-1, keepdim=True)
+
         # Get text features for different classification tasks
         text_feat_b = self.text_encoder(text_prompts_binary, tokenized_binary, deep_t_prompts)
         text_feat_a = self.text_encoder(text_prompts_attack, tokenized_attack, deep_t_prompts)
@@ -419,4 +453,4 @@ class UniBiFAS_Model(nn.Module):
         text_feat_a = text_feat_a / text_feat_a.norm(dim=-1, keepdim=True)
         text_feat_art = text_feat_art / text_feat_art.norm(dim=-1, keepdim=True)
         
-        return img_feat_norm, patch_tokens, text_feat_b, text_feat_a, text_feat_art
+        return img_feat_norm, cls_tokens, patch_tokens, text_feat_b, text_feat_a, text_feat_art

@@ -41,7 +41,7 @@ def run(
     message = (
         f"|{'epoch':^7}|"
         f"{' VALID ':-^24}|"
-        f"{' Train ':-^78}|"
+        f"{' Train ':-^65}|"
         f"{' Current Best ':-^24}|"
         f"{'time':^12}|\n"
     )
@@ -54,7 +54,7 @@ def run(
         f"{'':^12}|\n"
     )
     log.write(message, is_file=True)
-    log.write(f"|{'-' * 149}|\n", is_file=True)
+    log.write(f"|{'-' * 136}|\n", is_file=True)
 
     # --- Training Loop ---
     train_iter = iter(train_loader)
@@ -83,14 +83,17 @@ def run(
         with torch.amp.autocast("cuda", enabled=scaler is not None):
             # ASSUMPTION: The model now returns a tuple of features
             outputs = model(img)
-            img_feat_norm, patch_tokens, text_feat_b, text_feat_a, text_feat_art = outputs
+            img_feat_norm, cls_tokens, patch_tokens, text_feat_b, text_feat_a, text_feat_art = outputs
             
             # --- 1. Hierarchical Classification Loss Calculation ---
             logit_scale = model.logit_scale.exp()
             
+            # logits_binary = logit_scale * img_feat_norm @ text_feat_b.t()
+            # logits_attack = logit_scale * img_feat_norm @ text_feat_a.t()
+            # logits_artifact = logit_scale * img_feat_norm @ text_feat_art.t()
             logits_binary = logit_scale * img_feat_norm @ text_feat_b.t()
-            logits_attack = logit_scale * img_feat_norm @ text_feat_a.t()
-            logits_artifact = logit_scale * img_feat_norm @ text_feat_art.t()
+            logits_attack = logit_scale * cls_tokens[:,1,:] @ text_feat_a.t()
+            logits_artifact = logit_scale * cls_tokens[:,0,:] @ text_feat_art.t()
 
             loss_binary = criterion['cls_b'](logits_binary, binary_labels)
             loss_attack = criterion['cls_a'](logits_attack, attack_labels)
@@ -105,9 +108,15 @@ def run(
                 # Assume the "spoof" text feature is at index 1
                 spoof_text_feat = text_feat_b[1].unsqueeze(0).unsqueeze(-1) # Shape: [1, D, 1]
                 
-                # Calculate similarity between each patch and the "spoof" text feature
+                # Normalize patch tokens to calculate cosine similarity
+                patch_tokens = patch_tokens / (patch_tokens.norm(dim=2, keepdim=True) + 1e-8)
+                
+                # Calculate cosine similarity between each patch and the "spoof" text feature
                 # Shape: [N, num_patches, 1]
                 similarity_map = patch_tokens @ spoof_text_feat 
+                
+                # Rescale from [-1, 1] to [0, 1] range for comparison with SCM
+                similarity_map = (similarity_map + 1) / 2
 
                 # Reshape to a 2D map (assuming 14x14 patches for ViT-B/16)
                 h = w = int(similarity_map.shape[1]**0.5)

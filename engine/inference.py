@@ -36,7 +36,7 @@ def do_eval(val_loader, model, device, log):
 
             # Forward pass through the model
             # Model returns: img_feat_norm, patch_tokens, text_feat_b, text_feat_a, text_feat_art
-            img_feat_norm, patch_tokens, text_feat_b, text_feat_a, text_feat_art = model(img)
+            img_feat_norm, cls_tokens, patch_tokens, text_feat_b, text_feat_a, text_feat_art = model(img)
 
             # Compute logits for binary classification
             logit_scale = model.logit_scale.exp()
