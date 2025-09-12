@@ -172,9 +172,67 @@ class HierarchicalPromptLearner(nn.Module):
         prompts_binary = [f"{prompt_prefix} {name}." for name in classnames]
         tokenized_prompts_binary = torch.cat([clip.tokenize(p) for p in prompts_binary])
         
-        # Attack type prompts
+        # Attack type prompts - using template ensemble
+        from .prompt_templates import TeG_DG_real_templates, TeG_DG_print_templates, TeG_DG_replay_templates
+        
+        # Standard attack type prompts (for tokenization)
         prompts_attack = [f"{prompt_prefix} {name}." for name in attack_types]
         tokenized_prompts_attack = torch.cat([clip.tokenize(p) for p in prompts_attack])
+        
+        # Create ensemble for real templates (for embeddings only)
+        real_templates_embeddings = []
+        with torch.no_grad():
+            for template in TeG_DG_real_templates:
+                prompt = f"{prompt_prefix} {template}."
+                tokenized = clip.tokenize(prompt)
+                embedding = clip_model.token_embedding(tokenized).type(dtype)
+                real_templates_embeddings.append(embedding)
+            
+            # Average all template embeddings
+            real_ensemble_embedding = torch.mean(torch.stack(real_templates_embeddings), dim=0)
+        
+        # Create ensemble for print attack templates (for embeddings only)
+        print_templates_embeddings = []
+        with torch.no_grad():
+            for template in TeG_DG_print_templates:
+                prompt = f"{prompt_prefix} {template}."
+                tokenized = clip.tokenize(prompt)
+                embedding = clip_model.token_embedding(tokenized).type(dtype)
+                print_templates_embeddings.append(embedding)
+            
+            # Average all template embeddings
+            print_ensemble_embedding = torch.mean(torch.stack(print_templates_embeddings), dim=0)
+            
+        # Create ensemble for replay attack templates (for embeddings only)
+        replay_templates_embeddings = []
+        with torch.no_grad():
+            for template in TeG_DG_replay_templates:
+                prompt = f"{prompt_prefix} {template}."
+                tokenized = clip.tokenize(prompt)
+                embedding = clip_model.token_embedding(tokenized).type(dtype)
+                replay_templates_embeddings.append(embedding)
+            
+            # Average all template embeddings
+            replay_ensemble_embedding = torch.mean(torch.stack(replay_templates_embeddings), dim=0)
+        
+        # First get the original token embeddings to maintain token structure
+        with torch.no_grad():
+            embedding_attack_original = clip_model.token_embedding(tokenized_prompts_attack).type(dtype)
+        
+        # Create a hybrid approach: Start with original token structure, then replace content tokens
+        embedding_attack = embedding_attack_original.clone()
+        
+        # Replace the content tokens for each attack type with ensemble embeddings
+        # But keep the special tokens (like BOS, EOS) from the original embedding
+        for i, attack_type in enumerate(attack_types):
+            if "real" in attack_type.lower():
+                # Only replace the content tokens (keeping structure tokens intact)
+                # First token is preserved (BOS), last token is preserved (EOS)
+                embedding_attack[i, 1:1+self.n_ctx] = real_ensemble_embedding[0, 1:1+self.n_ctx]
+            elif "print" in attack_type.lower():
+                embedding_attack[i, 1:1+self.n_ctx] = print_ensemble_embedding[0, 1:1+self.n_ctx]
+            elif "replay" in attack_type.lower():
+                embedding_attack[i, 1:1+self.n_ctx] = replay_ensemble_embedding[0, 1:1+self.n_ctx]
         
         # Artifact type prompts
         prompts_artifact = [f"{prompt_prefix} {name}." for name in artifact_types]
@@ -183,7 +241,6 @@ class HierarchicalPromptLearner(nn.Module):
         # Store embeddings for all classification tasks
         with torch.no_grad():
             embedding_binary = clip_model.token_embedding(tokenized_prompts_binary).type(dtype)
-            embedding_attack = clip_model.token_embedding(tokenized_prompts_attack).type(dtype)
             embedding_artifact = clip_model.token_embedding(tokenized_prompts_artifact).type(dtype)
 
         # Binary classification

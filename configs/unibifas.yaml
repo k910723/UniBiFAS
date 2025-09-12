@@ -17,12 +17,12 @@ dataset:
         - 'a photo of a print attack'
         - 'a photo of a replay attack'
     artifact_types:
-        - 'a photo of real face'
-        - 'a photo of a spoof face with bnhalftone artifact'
-        - 'a photo of a spoof face with distortion artifact'
-        - 'a photo of a spoof face with sfchalftone artifact'
-        - 'a photo of a spoof face with moire pattern artifact'
-        - 'a photo of a spoof face with reflection artifact'
+        - 'a face with realistic texture'
+        - 'a face with bnhalftone artifact'
+        - 'a face with distortion artifact'
+        - 'a face with sfchalftone artifact'
+        - 'a face with moire pattern artifact'
+        - 'a face with reflection artifact'
 
 transforms:
     imgSize: 224
