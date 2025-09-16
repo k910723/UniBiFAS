@@ -73,6 +73,8 @@ def run(
         # The dataloader now returns image, spoof cue map, and hierarchical labels
         img, scm, labels = next(train_iter)
         img, scm, labels = img.to(device), scm.to(device), labels.to(device)
+        # Rescale scm to [0, 1]
+        scm = (scm - scm.min()) / (scm.max() - scm.min() + 1e-8)
         
         # Unpack hierarchical labels
         binary_labels = labels[:, 0]
@@ -107,16 +109,23 @@ def run(
             if len(patch_tokens) > 0:  # Process all images
                 # Assume the "spoof" text feature is at index 1
                 spoof_text_feat = text_feat_b[1].unsqueeze(0).unsqueeze(-1) # Shape: [1, D, 1]
+                real_text_feat = text_feat_b[0].unsqueeze(0).unsqueeze(-1) # Shape: [1, D, 1]
                 
                 # Normalize patch tokens to calculate cosine similarity
                 patch_tokens = patch_tokens / (patch_tokens.norm(dim=2, keepdim=True) + 1e-8)
                 
                 # Calculate cosine similarity between each patch and the "spoof" text feature
                 # Shape: [N, num_patches, 1]
-                similarity_map = patch_tokens @ spoof_text_feat 
+                # similarity_map = patch_tokens @ spoof_text_feat 
                 
                 # Rescale from [-1, 1] to [0, 1] range for comparison with SCM
-                similarity_map = (similarity_map + 1) / 2
+                # similarity_map = (similarity_map + 1) / 2
+
+                # Softmax over similarity to spoof and real text features
+                similarity_to_spoof = patch_tokens @ spoof_text_feat  # [N, num_patches, 1]
+                similarity_to_real = patch_tokens @ real_text_feat    # [N, num_patches, 1]
+                similarity_map = torch.cat([similarity_to_real, similarity_to_spoof], dim=-1)  # [N, num_patches, 2]
+                similarity_map = F.softmax(similarity_map, dim=-1)[:, :, 1:]  # Probability of being spoof
 
                 # Reshape to a 2D map (assuming 14x14 patches for ViT-B/16)
                 h = w = int(similarity_map.shape[1]**0.5)
@@ -172,6 +181,7 @@ def run(
                 best_HTER = valid_args[3]
                 best_ACC = valid_args[6]
                 best_AUC = valid_args[4]
+                TPR_at_FPR = valid_args[-1]
             
             # --- Save checkpoint logic here ---
             # save_checkpoint(...)
@@ -197,4 +207,4 @@ def run(
             binary_classifier_top1.reset()
 
 
-    return best_HTER * 100.0, best_AUC * 100.0
+    return best_HTER * 100.0, best_AUC * 100.0, TPR_at_FPR

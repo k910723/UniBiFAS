@@ -43,7 +43,7 @@ model:
     interaction_layers: [7, 10]   # Layers 0-3: V->T, 4-7: V<->T, 8-11: T->V
 
 train:
-    iters: 40000
+    iters: 5000
     iter_per_epoch: 100
     print_interval: 100
     amp: True

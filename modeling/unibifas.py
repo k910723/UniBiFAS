@@ -5,6 +5,7 @@ from clip.model import QuickGELU
 from collections import OrderedDict
 import os
 import copy
+from .prompt_templates import *
 
 # =================================================================================
 # Helper Function to Load CLIP
@@ -171,10 +172,46 @@ class HierarchicalPromptLearner(nn.Module):
         prompt_prefix = " ".join(["X"] * self.n_ctx)
         prompts_binary = [f"{prompt_prefix} {name}." for name in classnames]
         tokenized_prompts_binary = torch.cat([clip.tokenize(p) for p in prompts_binary])
+
+        # Create ensemble for binary real templates (for embeddings only)
+        binary_real_templates_embeddings = []
+        with torch.no_grad():
+            for template in FLIP_real_templates:
+                prompt = f"{prompt_prefix} {template}."
+                tokenized = clip.tokenize(prompt)
+                embedding = clip_model.token_embedding(tokenized).type(dtype)
+                binary_real_templates_embeddings.append(embedding)
+
+            # Average all template embeddings
+            binary_real_ensemble_embedding = torch.mean(torch.stack(binary_real_templates_embeddings), dim=0)
+
+        # Create ensemble for binary spoof templates (for embeddings only)
+        binary_spoof_templates_embeddings = []
+        with torch.no_grad():
+            for template in FLIP_spoof_templates:
+                prompt = f"{prompt_prefix} {template}."
+                tokenized = clip.tokenize(prompt)
+                embedding = clip_model.token_embedding(tokenized).type(dtype)
+                binary_spoof_templates_embeddings.append(embedding)
+            
+            # Average all template embeddings
+            binary_spoof_ensemble_embedding = torch.mean(torch.stack(binary_spoof_templates_embeddings), dim=0)
+
+        # First get the original token embeddings to maintain token structure
+        with torch.no_grad():
+            embedding_binary_original = clip_model.token_embedding(tokenized_prompts_binary).type(dtype) 
         
-        # Attack type prompts - using template ensemble
-        from .prompt_templates import TeG_DG_real_templates, TeG_DG_print_templates, TeG_DG_replay_templates
-        
+        # Create a hybrid approach: Start with original token structure, then replace content tokens
+        embedding_binary = embedding_binary_original.clone()
+        for i, classname in enumerate(classnames):
+            if "real" in classname.lower():
+                # Replace content tokens with real ensemble embeddings
+                embedding_binary[i, 1:1+self.n_ctx] = binary_real_ensemble_embedding[0, 1:1+self.n_ctx]
+            elif "spoof" in classname.lower():
+                # Replace content tokens with spoof ensemble embeddings
+                embedding_binary[i, 1:1+self.n_ctx] = binary_spoof_ensemble_embedding[0, 1:1+self.n_ctx]
+
+
         # Standard attack type prompts (for tokenization)
         prompts_attack = [f"{prompt_prefix} {name}." for name in attack_types]
         tokenized_prompts_attack = torch.cat([clip.tokenize(p) for p in prompts_attack])
