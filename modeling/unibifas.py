@@ -42,6 +42,45 @@ def LoadClip(cfg, zero_shot_model=False):
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
+class FeaturePreprocessMLP(nn.Module):
+    """MLP to post-process features after LKP modules."""
+    def __init__(self, input_dim, hidden_dim=None, dropout=0.1):
+        super().__init__()
+        if hidden_dim is None:
+            hidden_dim = input_dim * 2
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, input_dim),
+            nn.LayerNorm(input_dim)
+        )
+    
+    def forward(self, x):
+        return x + self.mlp(x)  # Residual connection
+
+class ProjectionMLP(nn.Module):
+    """Enhanced projection with MLP."""
+    def __init__(self, input_dim, output_dim, hidden_dim=None, dropout=0.1):
+        super().__init__()
+        if hidden_dim is None:
+            hidden_dim = max(input_dim, output_dim) * 2
+        
+        self.projection = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, output_dim),
+            nn.LayerNorm(output_dim)
+        )
+    
+    def forward(self, x):
+        return self.projection(x)
+
 class TextEncoder(nn.Module):
     def __init__(self, clip_model):
         super().__init__()
@@ -166,6 +205,20 @@ class HierarchicalPromptLearner(nn.Module):
         self.v_proxy_mid = nn.ParameterList([nn.Parameter(torch.randn(1, vis_dim, dtype=dtype)) for _ in range(self.mid_level_layers - self.low_level_layers)])
         self.t_proxy_mid = nn.ParameterList([nn.Parameter(torch.randn(1, ctx_dim, dtype=dtype)) for _ in range(self.mid_level_layers - self.low_level_layers)])
         self.t_proxy_high = nn.ParameterList([nn.Parameter(torch.randn(1, ctx_dim, dtype=dtype)) for _ in range(self.prompt_depth - self.mid_level_layers)])
+        
+        # --- MLP Post-processing Modules for LKP ---
+        self.visual_postprocess_mlp_low = nn.ModuleList([
+            FeaturePreprocessMLP(vis_dim) for _ in range(self.low_level_layers)
+        ])
+        self.visual_postprocess_mlp_mid = nn.ModuleList([
+            FeaturePreprocessMLP(vis_dim) for _ in range(self.mid_level_layers - self.low_level_layers)
+        ])
+        self.text_postprocess_mlp_mid = nn.ModuleList([
+            FeaturePreprocessMLP(ctx_dim) for _ in range(self.mid_level_layers - self.low_level_layers)
+        ])
+        self.text_postprocess_mlp_high = nn.ModuleList([
+            FeaturePreprocessMLP(ctx_dim) for _ in range(self.prompt_depth - self.mid_level_layers)
+        ])
         
         # --- Tokenization for Text Encoder (Multiple Classification Tasks) ---
         # Binary classification prompts
@@ -306,7 +359,9 @@ class HierarchicalPromptLearner(nn.Module):
         # 1. Low Level: Vision -> Text (e.g., layers 0-3)
         proxy_v_tokens = []
         for i in range(self.low_level_layers):
+            # Apply LKP first, then post-process with MLP
             proxy = self.lkp_v_low[i](self.v_proxy_low[i], self.cross_prompts_visual[i], self.cross_prompts_visual[i])
+            proxy = self.visual_postprocess_mlp_low[i](proxy)
             proxy_v_tokens.append(proxy)
         
         proxy_v_low = torch.cat(proxy_v_tokens, dim=0)
@@ -323,9 +378,13 @@ class HierarchicalPromptLearner(nn.Module):
         
         proxy_v_tokens_mid, proxy_t_tokens_mid = [], []
         for i, layer_idx in enumerate(mid_range):
+            # Apply LKP first, then post-process with MLPs
             proxy_v = self.lkp_v_mid[i](self.v_proxy_mid[i], self.cross_prompts_visual[layer_idx], self.cross_prompts_visual[layer_idx])
+            proxy_v = self.visual_postprocess_mlp_mid[i](proxy_v)
             proxy_v_tokens_mid.append(proxy_v)
+            
             proxy_t = self.lkp_t_mid[i](self.t_proxy_mid[i], self.cross_prompts_text[layer_idx], self.cross_prompts_text[layer_idx])
+            proxy_t = self.text_postprocess_mlp_mid[i](proxy_t)
             proxy_t_tokens_mid.append(proxy_t)
         
         proxy_v_mid = torch.cat(proxy_v_tokens_mid, dim=0)
@@ -347,7 +406,9 @@ class HierarchicalPromptLearner(nn.Module):
         high_range = range(self.mid_level_layers, self.prompt_depth)
         proxy_t_tokens_high = []
         for i, layer_idx in enumerate(high_range):
+            # Apply LKP first, then post-process with MLP
             proxy = self.lkp_t_high[i](self.t_proxy_high[i], self.cross_prompts_text[layer_idx], self.cross_prompts_text[layer_idx])
+            proxy = self.text_postprocess_mlp_high[i](proxy)
             proxy_t_tokens_high.append(proxy)
             
         proxy_t_high = torch.cat(proxy_t_tokens_high, dim=0)
@@ -408,11 +469,11 @@ class UniBiFAS_Model(nn.Module):
 
         # Projection layer for patch tokens to match text feature dimension
         # Vision features: 768, Text features: 512
-        self.patch_projection = nn.Linear(768, 512)
+        self.patch_projection = ProjectionMLP(768, 512)
 
-        self.low_cls_projection = nn.Linear(768, 512)
-        self.mid_cls_projection = nn.Linear(768, 512)
-        self.high_cls_projection = nn.Linear(768, 512)
+        self.low_cls_projection = ProjectionMLP(768, 512)
+        self.mid_cls_projection = ProjectionMLP(768, 512)
+        self.high_cls_projection = ProjectionMLP(768, 512)
         
         # Define interaction layers for patch token extraction
         # Convert from 1-based config indices to 0-based Python indices
