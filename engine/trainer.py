@@ -43,7 +43,7 @@ def run(
         f"{' VALID ':-^24}|"
         f"{' Train ':-^65}|"
         f"{' Current Best ':-^24}|"
-        f"{'time':^12}|\n"
+        f"{'time':^13}|\n"
     )
     log.write(message, is_file=True)
     message = (
@@ -51,10 +51,10 @@ def run(
         f"{'loss':^6}{'top-1':^6}{'HTER':^6}{'AUC':^6}|"
         f"{'lr':^10}{'L_bin':^9}{'L_atk':^9}{'L_art':^9}{'L_seg':^9}{'L_total':^10}{'top-1':^9}|"
         f"{'top-1':^8}{'HTER':^8}{'AUC':^8}|"
-        f"{'':^12}|\n"
+        f"{'':^13}|\n"
     )
     log.write(message, is_file=True)
-    log.write(f"|{'-' * 136}|\n", is_file=True)
+    log.write(f"|{'-' * 137}|\n", is_file=True)
 
     # --- Training Loop ---
     train_iter = iter(train_loader)

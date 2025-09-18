@@ -7,7 +7,7 @@ from tools import train, GetCfg
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 warnings.filterwarnings('ignore', category = UserWarning)
-
+warnings.filterwarnings("ignore", message="Failed to load image Python extension")
 
 if __name__ == '__main__':
     cfg = GetCfg()  # get all config

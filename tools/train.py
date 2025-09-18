@@ -14,12 +14,13 @@ def train(cfg, log):
 
     # Instantiate the model
     device = torch.device(cfg['device'] if torch.cuda.is_available() else "cpu")
+    print('\n--- Loading Model ---')
     model = BuildModel(cfg).to(device)
 
     # Check which parameters are trainable
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model created. Trainable parameters: {trainable_params}")
-    print("Trainable parameters should only be in the HierarchicalPromptLearner.")
+    print(f"\nModel created. Trainable parameters: {trainable_params / 1e6:.2f}M")
+    #print("Trainable parameters should only be in the HierarchicalPromptLearner.")
 
     criterion = {
         'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b']['params']),

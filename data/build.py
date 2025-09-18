@@ -48,6 +48,7 @@ def BuildLoader(cfg, isTrain=True, log=None):
         datasetTypes = [abbr2datasetType[key] for key in key_list]
 
         all_datasets = []
+        print(f"Training dataset root path: {cfg['dataset']['root_path']}")
         for datasetType in datasetTypes:
             dataset_path = os.path.join(cfg['dataset']['root_path'], datasetType)
 
@@ -103,6 +104,6 @@ def BuildLoader(cfg, isTrain=True, log=None):
     )
     
     print(f"DataLoader created with batch size: {cfg['dataset']['batch_size']}")
-    print("Each item in a batch will be a tuple: (images, spoof_cue_maps, labels)")
+    #print("Each item in a batch will be a tuple: (images, spoof_cue_maps, labels)")
 
     return dataloader
