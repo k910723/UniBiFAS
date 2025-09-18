@@ -18,8 +18,7 @@ def run(
     criterion, # Expecting a dict of loss functions: {'cls_b', 'cls_a', 'cls_art', 'seg'}
     device,
     log,
-    epoch,
-    iter_num_start
+    start_epoch
 ):
     # --- For Tracking Best score ---
     best_ACC = 0.0
@@ -57,123 +56,117 @@ def run(
     log.write(f"|{'-' * 137}|\n", is_file=True)
 
     # --- Training Loop ---
-    train_iter = iter(train_loader)
-    iter_per_epoch_train = len(train_iter)
     start = timer()
-
-    for iter_num in range(iter_num_start, cfg['train']['iters'] + 1):
-        if iter_num % iter_per_epoch_train == 0:
-            train_iter = iter(train_loader)
-        if iter_num != 0 and iter_num % cfg['train']['iter_per_epoch'] == 0:
-            epoch += 1
-        
+    
+    for epoch in range(start_epoch, cfg['train']['epochs'] + 1):
         model.train()
-
-        # --- Data Preparation ---
-        # The dataloader now returns image, spoof cue map, and hierarchical labels
-        img, scm, labels = next(train_iter)
-        img, scm, labels = img.to(device), scm.to(device), labels.to(device)
-        # Rescale scm to [0, 1]
-        scm = (scm - scm.min()) / (scm.max() - scm.min() + 1e-8)
         
-        # Unpack hierarchical labels
-        binary_labels = labels[:, 0]
-        attack_labels = labels[:, 1]
-        artifact_labels = labels[:, 2]
-
-        # --- Forward Pass ---
-        with torch.amp.autocast("cuda", enabled=scaler is not None):
-            # ASSUMPTION: The model now returns a tuple of features
-            outputs = model(img)
-            img_feat_norm, cls_tokens, patch_tokens, text_feat_b, text_feat_a, text_feat_art = outputs
+        # Reset meters for each epoch
+        loss_binary_meter.reset()
+        loss_attack_meter.reset()
+        loss_artifact_meter.reset()
+        loss_seg_meter.reset()
+        loss_total_meter.reset()
+        binary_classifier_top1.reset()
+        
+        # Iterate through the entire dataset (one epoch)
+        for batch_idx, (img, scm, labels) in enumerate(train_loader):
+            img, scm, labels = img.to(device), scm.to(device), labels.to(device)
+            # Rescale scm to [0, 1]
+            scm = (scm - scm.min()) / (scm.max() - scm.min() + 1e-8)
             
-            # --- 1. Hierarchical Classification Loss Calculation ---
-            logit_scale = model.logit_scale.exp()
+            # Unpack hierarchical labels
+            binary_labels = labels[:, 0]
+            attack_labels = labels[:, 1]
+            artifact_labels = labels[:, 2]
+
+            # --- Forward Pass ---
+            with torch.amp.autocast("cuda", enabled=scaler is not None):
+                # ASSUMPTION: The model now returns a tuple of features
+                outputs = model(img)
+                img_feat_norm, cls_tokens, patch_tokens, text_feat_b, text_feat_a, text_feat_art = outputs
+                
+                # --- 1. Hierarchical Classification Loss Calculation ---
+                logit_scale = model.logit_scale.exp()
+                
+                logits_binary = logit_scale * img_feat_norm @ text_feat_b.t()
+                logits_attack = logit_scale * cls_tokens[:,1,:] @ text_feat_a.t()
+                logits_artifact = logit_scale * cls_tokens[:,0,:] @ text_feat_art.t()
+
+                loss_binary = criterion['cls_b'](logits_binary, binary_labels)
+                loss_attack = criterion['cls_a'](logits_attack, attack_labels)
+                loss_artifact = criterion['cls_art'](logits_artifact, artifact_labels)
+
+                # --- 2. Segmentation Loss Calculation ---
+                # Create zero maps for real images and use SCM for fake images
+                fake_indices = (binary_labels == 1).nonzero(as_tuple=True)[0]
+                loss_seg = torch.tensor(0.0, device=device)
+
+                if len(patch_tokens) > 0:  # Process all images
+                    # Assume the "spoof" text feature is at index 1
+                    spoof_text_feat = text_feat_b[1].unsqueeze(0).unsqueeze(-1) # Shape: [1, D, 1]
+                    real_text_feat = text_feat_b[0].unsqueeze(0).unsqueeze(-1) # Shape: [1, D, 1]
+                    
+                    # Normalize patch tokens to calculate cosine similarity
+                    patch_tokens = patch_tokens / (patch_tokens.norm(dim=2, keepdim=True) + 1e-8)
+                    
+                    # Softmax over similarity to spoof and real text features
+                    similarity_to_spoof = patch_tokens @ spoof_text_feat  # [N, num_patches, 1]
+                    similarity_to_real = patch_tokens @ real_text_feat    # [N, num_patches, 1]
+                    similarity_map = torch.cat([similarity_to_real, similarity_to_spoof], dim=-1)  # [N, num_patches, 2]
+                    similarity_map = F.softmax(similarity_map, dim=-1)[:, :, 1:]  # Probability of being spoof
+
+                    # Reshape to a 2D map (assuming 14x14 patches for ViT-B/16)
+                    h = w = int(similarity_map.shape[1]**0.5)
+                    pred_map = similarity_map.squeeze(-1).view(len(binary_labels), 1, h, w)
+                    
+                    # Upsample the predicted map to match the SCM size
+                    pred_map_upsampled = F.interpolate(pred_map, size=scm.shape[-2:], mode='bilinear', align_corners=False)
+
+                    # Create target maps: zero maps for real images, SCM for fake images
+                    target_maps = torch.zeros_like(scm)
+                    if len(fake_indices) > 0:
+                        target_maps[fake_indices] = scm[fake_indices]
+
+                    # Calculate segmentation loss for all images
+                    loss_seg = criterion['seg'](pred_map_upsampled, target_maps)
+
+                # --- 3. Total Loss ---
+                total_loss = (cfg['loss_weights']['binary'] * loss_binary +
+                              cfg['loss_weights']['attack'] * loss_attack +
+                              cfg['loss_weights']['artifact'] * loss_artifact +
+                              cfg['loss_weights']['segmentation'] * loss_seg)
+
+            # --- Backward Pass ---
+            optimizer.zero_grad()
+            if scaler is not None:
+                scaler.scale(total_loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                total_loss.backward()
+                optimizer.step()
+
+            # --- Update Meters & Logging ---
+            lr = optimizer.param_groups[0]['lr']
+            # Store weighted losses to match what's used in total loss
+            weighted_loss_binary = cfg['loss_weights']['binary'] * loss_binary.item()
+            weighted_loss_attack = cfg['loss_weights']['attack'] * loss_attack.item()
+            weighted_loss_artifact = cfg['loss_weights']['artifact'] * loss_artifact.item()
+            weighted_loss_seg = cfg['loss_weights']['segmentation'] * loss_seg.item()
             
-            # logits_binary = logit_scale * img_feat_norm @ text_feat_b.t()
-            # logits_attack = logit_scale * img_feat_norm @ text_feat_a.t()
-            # logits_artifact = logit_scale * img_feat_norm @ text_feat_art.t()
-            logits_binary = logit_scale * img_feat_norm @ text_feat_b.t()
-            logits_attack = logit_scale * cls_tokens[:,1,:] @ text_feat_a.t()
-            logits_artifact = logit_scale * cls_tokens[:,0,:] @ text_feat_art.t()
+            loss_binary_meter.update(weighted_loss_binary)
+            loss_attack_meter.update(weighted_loss_attack)
+            loss_artifact_meter.update(weighted_loss_artifact)
+            loss_seg_meter.update(weighted_loss_seg)
+            loss_total_meter.update(total_loss.item())
 
-            loss_binary = criterion['cls_b'](logits_binary, binary_labels)
-            loss_attack = criterion['cls_a'](logits_attack, attack_labels)
-            loss_artifact = criterion['cls_art'](logits_artifact, artifact_labels)
+            acc = accuracy(logits_binary, binary_labels, topk=(1,))
+            binary_classifier_top1.update(acc[0].item())
 
-            # --- 2. Segmentation Loss Calculation ---
-            # Create zero maps for real images and use SCM for fake images
-            fake_indices = (binary_labels == 1).nonzero(as_tuple=True)[0]
-            loss_seg = torch.tensor(0.0, device=device)
-
-            if len(patch_tokens) > 0:  # Process all images
-                # Assume the "spoof" text feature is at index 1
-                spoof_text_feat = text_feat_b[1].unsqueeze(0).unsqueeze(-1) # Shape: [1, D, 1]
-                real_text_feat = text_feat_b[0].unsqueeze(0).unsqueeze(-1) # Shape: [1, D, 1]
-                
-                # Normalize patch tokens to calculate cosine similarity
-                patch_tokens = patch_tokens / (patch_tokens.norm(dim=2, keepdim=True) + 1e-8)
-                
-                # Calculate cosine similarity between each patch and the "spoof" text feature
-                # Shape: [N, num_patches, 1]
-                # similarity_map = patch_tokens @ spoof_text_feat 
-                
-                # Rescale from [-1, 1] to [0, 1] range for comparison with SCM
-                # similarity_map = (similarity_map + 1) / 2
-
-                # Softmax over similarity to spoof and real text features
-                similarity_to_spoof = patch_tokens @ spoof_text_feat  # [N, num_patches, 1]
-                similarity_to_real = patch_tokens @ real_text_feat    # [N, num_patches, 1]
-                similarity_map = torch.cat([similarity_to_real, similarity_to_spoof], dim=-1)  # [N, num_patches, 2]
-                similarity_map = F.softmax(similarity_map, dim=-1)[:, :, 1:]  # Probability of being spoof
-
-                # Reshape to a 2D map (assuming 14x14 patches for ViT-B/16)
-                h = w = int(similarity_map.shape[1]**0.5)
-                pred_map = similarity_map.squeeze(-1).view(len(binary_labels), 1, h, w)
-                
-                # Upsample the predicted map to match the SCM size
-                pred_map_upsampled = F.interpolate(pred_map, size=scm.shape[-2:], mode='bilinear', align_corners=False)
-
-                # Create target maps: zero maps for real images, SCM for fake images
-                target_maps = torch.zeros_like(scm)
-                if len(fake_indices) > 0:
-                    target_maps[fake_indices] = scm[fake_indices]
-
-                # Calculate segmentation loss for all images
-                loss_seg = criterion['seg'](pred_map_upsampled, target_maps)
-
-            # --- 3. Total Loss ---
-            total_loss = (cfg['loss_weights']['binary'] * loss_binary +
-                          cfg['loss_weights']['attack'] * loss_attack +
-                          cfg['loss_weights']['artifact'] * loss_artifact +
-                          cfg['loss_weights']['segmentation'] * loss_seg)
-
-        # --- Backward Pass ---
-        optimizer.zero_grad()
-        if scaler is not None:
-            scaler.scale(total_loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            total_loss.backward()
-            optimizer.step()
-
-        scheduler.step()
-
-        # --- Update Meters & Logging ---
-        lr = optimizer.param_groups[0]['lr']
-        loss_binary_meter.update(loss_binary.item())
-        loss_attack_meter.update(loss_attack.item())
-        loss_artifact_meter.update(loss_artifact.item())
-        loss_seg_meter.update(loss_seg.item())
-        loss_total_meter.update(total_loss.item())
-
-        acc = accuracy(logits_binary, binary_labels, topk=(1,))
-        binary_classifier_top1.update(acc[0].item())
-
-        # --- Validation and Checkpointing (at epoch end) ---
-        if iter_num != 0 and (iter_num + 1) % cfg['train']['iter_per_epoch'] == 0:
-            # Note: The do_eval function might need adjustment if it relies on a different model output
+        # --- End of Epoch: Validation and Logging ---
+        if epoch % cfg['train']['print_interval'] == 0 or epoch == cfg['train']['epochs']:
+            # Run validation
             valid_args = do_eval(val_loader, model, device, log)
 
             is_best = valid_args[3] <= best_HTER
@@ -197,14 +190,9 @@ def run(
                 f"{time_to_str(timer() - start, 'sec'):^12}|\n"
             )
             log.write(message, is_file=True)
-
-            # Reset meters for the next epoch
-            loss_binary_meter.reset()
-            loss_attack_meter.reset()
-            loss_artifact_meter.reset()
-            loss_seg_meter.reset()
-            loss_total_meter.reset()
-            binary_classifier_top1.reset()
-
+            
+        # Update scheduler at the end of each epoch
+        if scheduler is not None:
+            scheduler.step()
 
     return best_HTER * 100.0, best_AUC * 100.0, TPR_at_FPR

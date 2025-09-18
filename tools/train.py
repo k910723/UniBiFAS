@@ -19,7 +19,7 @@ def train(cfg, log):
 
     # Check which parameters are trainable
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"\nModel created. Trainable parameters: {trainable_params / 1e6:.2f}M")
+    print(f"Model created. Trainable parameters: {trainable_params / 1e6:.2f}M")
     #print("Trainable parameters should only be in the HierarchicalPromptLearner.")
 
     criterion = {
@@ -34,20 +34,18 @@ def train(cfg, log):
     scaler = torch.amp.GradScaler('cuda') if cfg['train']['amp'] else None
 
     # Load if checkpoint is provided
-    if cfg['ckpt']:
+    if cfg.get('ckpt'):
         ckpt = torch.load(cfg['ckpt'])
         model.load_state_dict(ckpt['state_dict'])
         optimizer.load_state_dict(ckpt['optimizer'])
         scheduler.load_state_dict(ckpt['scheduler'])
-        epoch = ckpt['epoch']
-        iter_num_start = epoch * cfg['iter_per_epoch']
+        start_epoch = ckpt['epoch'] + 1  # Continue from next epoch
         if cfg['train']['amp']:
             scaler.load_state_dict(ckpt["scaler"])
-        log.write(f'\nLoaded checkpoint from epoch {epoch} at iteration : {iter_num_start}\n', is_file = 1)
+        log.write(f'\nLoaded checkpoint from epoch {ckpt["epoch"]}, continuing from epoch {start_epoch}\n', is_file = 1)
     else:
-        epoch = 1
-        iter_num_start = 0
-        log.write(f'\nStarting training from epoch {epoch} at iteration : {iter_num_start}\n', is_file = 1)
+        start_epoch = 1
+        log.write(f'\nStarting training from epoch {start_epoch}\n', is_file = 1)
 
 
     hter, auc, tpr_fpr = run(
@@ -61,8 +59,7 @@ def train(cfg, log):
         criterion,
         device,
         log,
-        epoch,
-        iter_num_start
+        start_epoch
     )
 
     return hter, auc, tpr_fpr

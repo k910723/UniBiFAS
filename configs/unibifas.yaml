@@ -40,12 +40,11 @@ model:
     backbone: ViT-B/16
     n_ctx: 4                     # Number of learnable tokens per prompt
     prompt_depth: 12             # Max 12, Min 1 ,for 1 it will act asa shallow MaPLe (J = 1)
-    interaction_layers: [7, 10]   # Layers 0-3: V->T, 4-7: V<->T, 8-11: T->V
+    interaction_layers: [8, 10]   # Layers 0-3: V->T, 4-7: V<->T, 8-11: T->V
 
 train:
-    iters: 100000
-    iter_per_epoch: 100
-    print_interval: 100
+    epochs: 1000                 # Number of epochs
+    print_interval: 1            # Print metrics every N epochs
     amp: True
 
 optimizer:
