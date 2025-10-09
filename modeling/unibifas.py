@@ -167,7 +167,17 @@ class HierarchicalPromptLearner(nn.Module):
         vis_dim = 768
         dtype = clip_model.dtype
         
-        # --- Initialize Text Prompts ---
+        # Initialize prompts and attention mechanisms
+        self._initialize_prompts(ctx_dim, vis_dim, dtype)
+        self._initialize_attention_mechanisms(ctx_dim, vis_dim)
+        self._initialize_knowledge_proxies(ctx_dim, vis_dim, dtype)
+        self._initialize_postprocess_mlps(ctx_dim, vis_dim)
+        
+        # Initialize text prompts with ensembling
+        self._initialize_text_prompts(cfg, classnames, attack_types, artifact_types, clip_model, dtype)
+
+    def _initialize_prompts(self, ctx_dim, vis_dim, dtype):
+        """Initialize text and visual prompts."""
         ctx_vectors = torch.empty(self.n_ctx, ctx_dim, dtype=dtype)
         nn.init.normal_(ctx_vectors, std=0.02)
         self.ctx = nn.Parameter(ctx_vectors)
@@ -178,14 +188,14 @@ class HierarchicalPromptLearner(nn.Module):
         for p in self.cross_prompts_text[1:]:
             nn.init.normal_(p, std=0.02)
         
-        # --- Initialize Visual Prompts ---
         self.cross_prompts_visual = nn.ParameterList(
             [nn.Parameter(torch.empty(self.n_ctx, vis_dim, dtype=dtype)) for _ in range(self.prompt_depth)]
         )
         for p in self.cross_prompts_visual:
             nn.init.normal_(p, std=0.02)
-        
-        # --- Attention Mechanisms for Interaction ---
+
+    def _initialize_attention_mechanisms(self, ctx_dim, vis_dim):
+        """Initialize attention mechanisms for cross-modal interaction."""
         # Vision -> Text (Low Level)
         self.v2t_low = CrossPromptAttention(ctx_dim, vis_dim, num_attention_heads=8)
         # Vision <-> Text (Mid Level)
@@ -194,7 +204,8 @@ class HierarchicalPromptLearner(nn.Module):
         # Text -> Vision (High Level)
         self.t2v_high = CrossPromptAttention(vis_dim, ctx_dim, num_attention_heads=8)
 
-        # --- Knowledge Proxies (LKP) ---
+    def _initialize_knowledge_proxies(self, ctx_dim, vis_dim, dtype):
+        """Initialize Layer-specific Knowledge Proxies (LKP)."""
         self.lkp_v_low = _get_clones(AttentionPooling(vis_dim, 8), self.low_level_layers)
         self.lkp_v_mid = _get_clones(AttentionPooling(vis_dim, 8), self.mid_level_layers - self.low_level_layers)
         self.lkp_t_mid = _get_clones(AttentionPooling(ctx_dim, 8), self.mid_level_layers - self.low_level_layers)
@@ -205,8 +216,9 @@ class HierarchicalPromptLearner(nn.Module):
         self.v_proxy_mid = nn.ParameterList([nn.Parameter(torch.randn(1, vis_dim, dtype=dtype)) for _ in range(self.mid_level_layers - self.low_level_layers)])
         self.t_proxy_mid = nn.ParameterList([nn.Parameter(torch.randn(1, ctx_dim, dtype=dtype)) for _ in range(self.mid_level_layers - self.low_level_layers)])
         self.t_proxy_high = nn.ParameterList([nn.Parameter(torch.randn(1, ctx_dim, dtype=dtype)) for _ in range(self.prompt_depth - self.mid_level_layers)])
-        
-        # --- MLP Post-processing Modules for LKP ---
+
+    def _initialize_postprocess_mlps(self, ctx_dim, vis_dim):
+        """Initialize MLP post-processing modules for LKP."""
         self.visual_postprocess_mlp_low = nn.ModuleList([
             FeaturePreprocessMLP(vis_dim) for _ in range(self.low_level_layers)
         ])
@@ -219,120 +231,92 @@ class HierarchicalPromptLearner(nn.Module):
         self.text_postprocess_mlp_high = nn.ModuleList([
             FeaturePreprocessMLP(ctx_dim) for _ in range(self.prompt_depth - self.mid_level_layers)
         ])
+
+    def _create_template_ensemble(self, templates, prompt_prefix, clip_model, dtype):
+        """Create ensemble embedding from multiple templates."""
+        template_embeddings = []
+        with torch.no_grad():
+            for template in templates:
+                prompt = f"{prompt_prefix} {template}."
+                tokenized = clip.tokenize(prompt)
+                embedding = clip_model.token_embedding(tokenized).type(dtype)
+                template_embeddings.append(embedding)
+            
+            # Average all template embeddings
+            ensemble_embedding = torch.mean(torch.stack(template_embeddings), dim=0)
+        return ensemble_embedding
+
+    def _replace_prompt_embeddings(self, original_embedding, class_mappings, ensemble_mappings):
+        """Replace prompt embeddings based on class and ensemble mappings."""
+        embedding = original_embedding.clone()
         
+        for i, class_name in enumerate(class_mappings):
+            for key, ensemble_emb in ensemble_mappings.items():
+                if key.lower() in class_name.lower():
+                    # Replace suffix tokens with ensemble embeddings
+                    embedding[i, 1+self.n_ctx:] = ensemble_emb[0, 1+self.n_ctx:]
+                    break
+        
+        return embedding
+
+    def _initialize_text_prompts(self, cfg, classnames, attack_types, artifact_types, clip_model, dtype):
+        """Initialize text prompts with template ensembling for multiple classification tasks."""
         # --- Tokenization for Text Encoder (Multiple Classification Tasks) ---
-        # Binary classification prompts
         prompt_prefix = " ".join(["X"] * self.n_ctx)
+        
+        # === Binary Classification ===
         prompts_binary = [f"{prompt_prefix} {name}." for name in classnames]
         tokenized_prompts_binary = torch.cat([clip.tokenize(p) for p in prompts_binary])
 
-        # Create ensemble for binary real templates (for embeddings only)
-        binary_real_templates_embeddings = []
-        with torch.no_grad():
-            for template in FLIP_real_templates:
-                prompt = f"{prompt_prefix} {template}."
-                tokenized = clip.tokenize(prompt)
-                embedding = clip_model.token_embedding(tokenized).type(dtype)
-                binary_real_templates_embeddings.append(embedding)
+        # Create template ensembles for binary classification
+        binary_real_ensemble = self._create_template_ensemble(
+            FLIP_real_templates, prompt_prefix, clip_model, dtype)
+        binary_spoof_ensemble = self._create_template_ensemble(
+            FLIP_spoof_templates, prompt_prefix, clip_model, dtype)
 
-            # Average all template embeddings
-            binary_real_ensemble_embedding = torch.mean(torch.stack(binary_real_templates_embeddings), dim=0)
-
-        # Create ensemble for binary spoof templates (for embeddings only)
-        binary_spoof_templates_embeddings = []
+        # Create binary embeddings with ensemble replacement
         with torch.no_grad():
-            for template in FLIP_spoof_templates:
-                prompt = f"{prompt_prefix} {template}."
-                tokenized = clip.tokenize(prompt)
-                embedding = clip_model.token_embedding(tokenized).type(dtype)
-                binary_spoof_templates_embeddings.append(embedding)
-            
-            # Average all template embeddings
-            binary_spoof_ensemble_embedding = torch.mean(torch.stack(binary_spoof_templates_embeddings), dim=0)
-
-        # First get the original token embeddings to maintain token structure
-        with torch.no_grad():
-            embedding_binary_original = clip_model.token_embedding(tokenized_prompts_binary).type(dtype) 
+            embedding_binary_original = clip_model.token_embedding(tokenized_prompts_binary).type(dtype)
         
-        # Create a hybrid approach: Start with original token structure, then replace content tokens
-        embedding_binary = embedding_binary_original.clone()
-        for i, classname in enumerate(classnames):
-            if "real" in classname.lower():
-                # Replace content tokens with real ensemble embeddings
-                embedding_binary[i, 1+self.n_ctx:] = binary_real_ensemble_embedding[0, 1+self.n_ctx:]
-            elif "spoof" in classname.lower():
-                # Replace content tokens with spoof ensemble embeddings
-                embedding_binary[i, 1+self.n_ctx:] = binary_spoof_ensemble_embedding[0, 1+self.n_ctx:]
+        binary_ensemble_mappings = {
+            'real': binary_real_ensemble,
+            'spoof': binary_spoof_ensemble
+        }
+        embedding_binary = self._replace_prompt_embeddings(
+            embedding_binary_original, classnames, binary_ensemble_mappings)
 
-
-        # Standard attack type prompts (for tokenization)
+        # === Attack Type Classification ===
         prompts_attack = [f"{prompt_prefix} {name}." for name in attack_types]
         tokenized_prompts_attack = torch.cat([clip.tokenize(p) for p in prompts_attack])
         
-        # Create ensemble for real templates (for embeddings only)
-        real_templates_embeddings = []
-        with torch.no_grad():
-            for template in TeG_DG_real_templates:
-                prompt = f"{prompt_prefix} {template}."
-                tokenized = clip.tokenize(prompt)
-                embedding = clip_model.token_embedding(tokenized).type(dtype)
-                real_templates_embeddings.append(embedding)
-            
-            # Average all template embeddings
-            real_ensemble_embedding = torch.mean(torch.stack(real_templates_embeddings), dim=0)
-        
-        # Create ensemble for print attack templates (for embeddings only)
-        print_templates_embeddings = []
-        with torch.no_grad():
-            for template in TeG_DG_print_templates:
-                prompt = f"{prompt_prefix} {template}."
-                tokenized = clip.tokenize(prompt)
-                embedding = clip_model.token_embedding(tokenized).type(dtype)
-                print_templates_embeddings.append(embedding)
-            
-            # Average all template embeddings
-            print_ensemble_embedding = torch.mean(torch.stack(print_templates_embeddings), dim=0)
-            
-        # Create ensemble for replay attack templates (for embeddings only)
-        replay_templates_embeddings = []
-        with torch.no_grad():
-            for template in TeG_DG_replay_templates:
-                prompt = f"{prompt_prefix} {template}."
-                tokenized = clip.tokenize(prompt)
-                embedding = clip_model.token_embedding(tokenized).type(dtype)
-                replay_templates_embeddings.append(embedding)
-            
-            # Average all template embeddings
-            replay_ensemble_embedding = torch.mean(torch.stack(replay_templates_embeddings), dim=0)
-        
-        # First get the original token embeddings to maintain token structure
+        # Create template ensembles for attack classification
+        real_ensemble = self._create_template_ensemble(
+            TeG_DG_real_templates, prompt_prefix, clip_model, dtype)
+        print_ensemble = self._create_template_ensemble(
+            TeG_DG_print_templates, prompt_prefix, clip_model, dtype)
+        replay_ensemble = self._create_template_ensemble(
+            TeG_DG_replay_templates, prompt_prefix, clip_model, dtype)
+
+        # Create attack embeddings with ensemble replacement
         with torch.no_grad():
             embedding_attack_original = clip_model.token_embedding(tokenized_prompts_attack).type(dtype)
         
-        # Create a hybrid approach: Start with original token structure, then replace content tokens
-        embedding_attack = embedding_attack_original.clone()
-        
-        # Replace the content tokens for each attack type with ensemble embeddings
-        # But keep the special tokens (like BOS, EOS) from the original embedding
-        for i, attack_type in enumerate(attack_types):
-            if "real" in attack_type.lower():
-                # Only replace the content tokens (keeping structure tokens intact)
-                # First token is preserved (BOS), last token is preserved (EOS)
-                embedding_attack[i, 1+self.n_ctx:] = real_ensemble_embedding[0, 1+self.n_ctx:]
-            elif "print" in attack_type.lower():
-                embedding_attack[i, 1+self.n_ctx:] = print_ensemble_embedding[0, 1+self.n_ctx:]
-            elif "replay" in attack_type.lower():
-                embedding_attack[i, 1+self.n_ctx:] = replay_ensemble_embedding[0, 1+self.n_ctx:]
+        attack_ensemble_mappings = {
+            'real': real_ensemble,
+            'print': print_ensemble,
+            'replay': replay_ensemble
+        }
+        embedding_attack = self._replace_prompt_embeddings(
+            embedding_attack_original, attack_types, attack_ensemble_mappings)
 
-        # Artifact type prompts
+        # === Artifact Type Classification ===
         prompts_artifact = [f"{prompt_prefix} {name}." for name in artifact_types]
         tokenized_prompts_artifact = torch.cat([clip.tokenize(p) for p in prompts_artifact])
         
-        # Store embeddings for all classification tasks
         with torch.no_grad():
-            # embedding_binary = clip_model.token_embedding(tokenized_prompts_binary).type(dtype)
             embedding_artifact = clip_model.token_embedding(tokenized_prompts_artifact).type(dtype)
 
+        # === Register Buffers ===
         # Binary classification
         self.register_buffer('token_prefix_binary', embedding_binary[:, :1, :])
         self.register_buffer('token_suffix_binary', embedding_binary[:, 1 + self.n_ctx:, :])
