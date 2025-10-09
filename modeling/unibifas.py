@@ -259,10 +259,10 @@ class HierarchicalPromptLearner(nn.Module):
         for i, classname in enumerate(classnames):
             if "real" in classname.lower():
                 # Replace content tokens with real ensemble embeddings
-                embedding_binary[i, 1:1+self.n_ctx] = binary_real_ensemble_embedding[0, 1:1+self.n_ctx]
+                embedding_binary[i, 1+self.n_ctx:] = binary_real_ensemble_embedding[0, 1+self.n_ctx:]
             elif "spoof" in classname.lower():
                 # Replace content tokens with spoof ensemble embeddings
-                embedding_binary[i, 1:1+self.n_ctx] = binary_spoof_ensemble_embedding[0, 1:1+self.n_ctx]
+                embedding_binary[i, 1+self.n_ctx:] = binary_spoof_ensemble_embedding[0, 1+self.n_ctx:]
 
 
         # Standard attack type prompts (for tokenization)
@@ -318,19 +318,19 @@ class HierarchicalPromptLearner(nn.Module):
             if "real" in attack_type.lower():
                 # Only replace the content tokens (keeping structure tokens intact)
                 # First token is preserved (BOS), last token is preserved (EOS)
-                embedding_attack[i, 1:1+self.n_ctx] = real_ensemble_embedding[0, 1:1+self.n_ctx]
+                embedding_attack[i, 1+self.n_ctx:] = real_ensemble_embedding[0, 1+self.n_ctx:]
             elif "print" in attack_type.lower():
-                embedding_attack[i, 1:1+self.n_ctx] = print_ensemble_embedding[0, 1:1+self.n_ctx]
+                embedding_attack[i, 1+self.n_ctx:] = print_ensemble_embedding[0, 1+self.n_ctx:]
             elif "replay" in attack_type.lower():
-                embedding_attack[i, 1:1+self.n_ctx] = replay_ensemble_embedding[0, 1:1+self.n_ctx]
-        
+                embedding_attack[i, 1+self.n_ctx:] = replay_ensemble_embedding[0, 1+self.n_ctx:]
+
         # Artifact type prompts
         prompts_artifact = [f"{prompt_prefix} {name}." for name in artifact_types]
         tokenized_prompts_artifact = torch.cat([clip.tokenize(p) for p in prompts_artifact])
         
         # Store embeddings for all classification tasks
         with torch.no_grad():
-            embedding_binary = clip_model.token_embedding(tokenized_prompts_binary).type(dtype)
+            # embedding_binary = clip_model.token_embedding(tokenized_prompts_binary).type(dtype)
             embedding_artifact = clip_model.token_embedding(tokenized_prompts_artifact).type(dtype)
 
         # Binary classification

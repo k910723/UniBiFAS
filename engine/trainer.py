@@ -169,7 +169,7 @@ def run(
             # Run validation
             valid_args = do_eval(val_loader, model, device, log)
 
-            is_best = valid_args[3] <= best_HTER
+            is_best = valid_args[3] < best_HTER or (valid_args[3] == best_HTER and valid_args[4] > best_AUC)
             if is_best:
                 best_HTER = valid_args[3]
                 best_ACC = valid_args[6]
