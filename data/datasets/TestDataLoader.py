@@ -41,13 +41,16 @@ class TestFASDataset(Dataset):
             'O': 'Oulu',
             'C': 'casia',
             'I': 'replay',
-            'M': 'MSU'
+            'M': 'MSU',
+            'D': '3DMAD',
+            'H': 'HKBUv1+',
+            'U': 'casia_3d'
         }
 
         all_live_images = []
         all_spoof_images = []
 
-        data_path = self.root_dir / 'domain-generalization'
+        # data_path = self.root_dir / 'domain-generalization'
 
         for p in protocol:
             if p not in self.protocol_map:
@@ -55,7 +58,11 @@ class TestFASDataset(Dataset):
                 continue
             
             base_name = self.protocol_map[p]
-            
+            if p == 'D' or p == 'H' or p == 'U':
+                data_path = self.root_dir / "3Dmask"
+            else:
+                data_path = self.root_dir / "domain-generalization"
+
             live_path = data_path / f"{base_name}_images_live.npy"
             spoof_path = data_path / f"{base_name}_images_spoof.npy"
 

@@ -12,7 +12,7 @@ python main.py --config configs/unibifas.yaml --op_dir ./output --source OCI --t
 - [x] **Hierarchical Loss**
   - Implemented calculation using class tokens from early layers.
 
-- [ ] **Segmentation Loss**
+- [x] **Segmentation Loss**
   - Now the segmentation loss only calculate similarity between spoof text and patches tokens.
 
 - [ ] **Dataset Specification**
