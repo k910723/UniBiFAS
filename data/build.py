@@ -7,7 +7,7 @@ from .transforms import FasTransforms
 from .datasets import HierarchicalFasDataset, TestFASDataset
 from .batchsampler import BatchSchedulerSampler, SchedulerSampler
 
-def BuildLoader(cfg, isTrain=True, log=None):
+def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, log=None):
     """
     Builds a DataLoader for either training or testing.
 
@@ -69,6 +69,26 @@ def BuildLoader(cfg, isTrain=True, log=None):
 
         concatDataset = ConcatDataset(all_datasets)
 
+    elif isTrainVisualPrompt:
+        print('\n--- Loading Source Domains for Visual Prompt Tuning ---')
+        domain_keys = cfg['dataset']['source']
+
+        # Create the protocol list from the domain keys string
+        if ' ' in domain_keys:
+            protocol = domain_keys.split()
+        else:
+            protocol = list(domain_keys)
+        
+        print(f"Loading training protocols: {protocol}")
+        
+        concatDataset = TestFASDataset(
+            root_dir=cfg['dataset']['test_path'],
+            protocol=protocol,
+            transform=simple_transforms,
+            live_only=True  # Only load live images for visual prompt tuning
+        )
+        
+
     else:
         # --- TESTING LOADER ---
         # Uses TestFASDataset for target domains (O, Ca, I, M from .npy files)
@@ -99,7 +119,7 @@ def BuildLoader(cfg, isTrain=True, log=None):
     dataloader = DataLoader(
         concatDataset,
         batch_size=cfg['dataset']['batch_size'],
-        shuffle=isTrain,
+        shuffle=isTrain or isTrainVisualPrompt,
         num_workers=cfg['dataset']['num_workers']
     )
     

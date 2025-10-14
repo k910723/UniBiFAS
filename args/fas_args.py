@@ -14,4 +14,7 @@ def get_parser():
     parser.add_argument('--target', type = str, help = 'target dataset')
     parser.add_argument('--size', type = int, help = 'sample size of each datasetType and labelType in each batch')
 
+    parser.add_argument('--save_ckpt', action='store_true', help = 'Whether to save checkpoints during training')
+    parser.add_argument('--visual_prompt_mode', type = str, default=None, help = 'Mode for visual prompt tuning: stage1/stage2')
+
     return parser

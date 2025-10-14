@@ -178,6 +178,8 @@ def run(
             
             # --- Save checkpoint logic here ---
             # save_checkpoint(...)
+            if is_best and cfg.get('save_ckpt'):
+                save_checkpoint(valid_args, is_best, model, optimizer, scheduler, filename=cfg['ckpt'])
 
             print('\r', end='', flush=True)
             message = (

@@ -2,8 +2,8 @@ base:
     repeat_num: 1
 
 dataset:
-    root_path: '/shared/shared/FAS_AUG'
-    test_path: '/shared/shared'
+    root_path: '/shared/FAS_AUG'
+    test_path: '/shared'
     source: 'c'    # c, i, o, m, ci, ..., cio, ..., ciom
     target: 'i'    # c, i, o, m, ci, ..., cio, ..., ciom
     batch_size: 32
@@ -46,6 +46,12 @@ train:
     epochs: 1000                 # Number of epochs
     print_interval: 1            # Print metrics every N epochs
     amp: True
+
+train_visual_prompt:
+    lr: 1.0e-1                    # Learning rate for visual prompt tuning
+    weight_decay: 1.0e-3          # Weight decay for visual prompt tuning
+    epochs: 100                     # Number of epochs for visual prompt tuning
+    save_path: 'output'  # Path to save visual prompt
 
 optimizer:
   name: Adam

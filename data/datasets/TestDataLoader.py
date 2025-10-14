@@ -28,7 +28,7 @@ class TestFASDataset(Dataset):
     where dummy_tensor is a zero tensor and labels_tensor contains the binary label.
     """
 
-    def __init__(self, root_dir, protocol, transform=None):
+    def __init__(self, root_dir, protocol, transform=None, live_only=False):
         """
         Args:
             root_dir (string): Root directory containing the 'domain-generalization' folder.
@@ -37,6 +37,7 @@ class TestFASDataset(Dataset):
         """
         self.root_dir = Path(root_dir)
         self.transform = transform
+        self.live_only = live_only
         self.protocol_map = {
             'O': 'Oulu',
             'C': 'casia',
@@ -90,8 +91,11 @@ class TestFASDataset(Dataset):
         live_labels = np.zeros(len(live_images), dtype=np.int64)
         spoof_labels = np.ones(len(spoof_images), dtype=np.int64)
         
-        # Combine live and spoof data
-        if len(live_images) > 0 and len(spoof_images) > 0:
+        if self.live_only:
+            self.total_images = live_images
+            self.total_labels = live_labels
+        elif len(live_images) > 0 and len(spoof_images) > 0:
+            # Combine live and spoof data
             self.total_images = np.concatenate((live_images, spoof_images), axis=0)
             self.total_labels = np.concatenate((live_labels, spoof_labels), axis=0)
         elif len(live_images) > 0:
@@ -123,6 +127,7 @@ class TestFASDataset(Dataset):
             
             # Remove singleton dimensions (e.g., (1,1,3) -> (1,3) -> (3,))
             processed_img = np.squeeze(processed_img)
+            # processed_img *= 255.0  # Scale to [0, 1] if in [0, 0.0039]. For visualization only!!!
                         
             # Convert data type to uint8 if it's float
             if processed_img.dtype == np.float32 or processed_img.dtype == np.float64:

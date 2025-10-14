@@ -29,6 +29,13 @@ def GetCfg():
 
     if args_dict['size']:
         cfg['dataset']['size'] = args_dict['size']
+    
+    if args_dict['save_ckpt']:
+        cfg['save_ckpt'] = args_dict['save_ckpt']
+
+    if args_dict['visual_prompt_mode']:
+        cfg['visual_prompt_mode'] = args_dict['visual_prompt_mode']
+        
 
     cfg['now_time'] = datetime.now().strftime("%Y%m%d-%H%M%S")
     cfg['exp_name'] = f"{cfg['model']['mode']}_{cfg['dataset']['source']}_{cfg['dataset']['target']}_{cfg['now_time']}"
