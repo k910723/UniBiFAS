@@ -7,7 +7,7 @@ from .transforms import FasTransforms
 from .datasets import HierarchicalFasDataset, TestFASDataset
 from .batchsampler import BatchSchedulerSampler, SchedulerSampler
 
-def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, log=None):
+def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, isFineTune=False, log=None):
     """
     Builds a DataLoader for either training or testing.
 
@@ -28,7 +28,7 @@ def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, log=None):
         transforms.Normalize(mean=cfg['transforms']['mean'], std=cfg['transforms']['std'])
     ])
 
-    if isTrain:
+    if isTrain or isTrainVisualPrompt:
         # --- TRAINING LOADER ---
         # Uses HierarchicalFasDataset for source domains
         print('\n--- Loading Source Domains for Training ---')
@@ -59,7 +59,10 @@ def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, log=None):
             dataset = HierarchicalFasDataset(
                 root_dir=dataset_path,
                 transform=simple_transforms,
-                scm_transform=simple_transforms
+                scm_transform=simple_transforms,
+                live_only=isTrainVisualPrompt,
+                finetune=isFineTune,
+                visual_prompt_path=cfg['train_visual_prompt']['save_path'] if isFineTune else None,
             )
             all_datasets.append(dataset)
             print(f"Loaded '{datasetType}' with {len(dataset)} total samples.")
@@ -69,24 +72,6 @@ def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, log=None):
 
         concatDataset = ConcatDataset(all_datasets)
 
-    elif isTrainVisualPrompt:
-        print('\n--- Loading Source Domains for Visual Prompt Tuning ---')
-        domain_keys = cfg['dataset']['source']
-
-        # Create the protocol list from the domain keys string
-        if ' ' in domain_keys:
-            protocol = domain_keys.split()
-        else:
-            protocol = list(domain_keys)
-        
-        print(f"Loading training protocols: {protocol}")
-        
-        concatDataset = TestFASDataset(
-            root_dir=cfg['dataset']['test_path'],
-            protocol=protocol,
-            transform=simple_transforms,
-            live_only=True  # Only load live images for visual prompt tuning
-        )
         
 
     else:

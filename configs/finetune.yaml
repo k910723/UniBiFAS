@@ -16,6 +16,7 @@ dataset:
         - 'a photo of a real face'
         - 'a photo of a print attack'
         - 'a photo of a replay attack'
+        - 'a photo of a unrealistic face'
     artifact_types:
         - 'a face with realistic texture'
         - 'a face with bnhalftone artifact'
@@ -23,6 +24,7 @@ dataset:
         - 'a face with sfchalftone artifact'
         - 'a face with moire pattern artifact'
         - 'a face with reflection artifact'
+        - 'a face with unrealistic texture'
 
 transforms:
     imgSize: 224
@@ -49,7 +51,7 @@ train:
     save_path: 'output/checkpoint.pt'
 
 train_visual_prompt:
-    lr: 1.0e-1                    # Learning rate for visual prompt tuning
+    lr: 1.0e-2                    # Learning rate for visual prompt tuning
     weight_decay: 1.0e-3          # Weight decay for visual prompt tuning
     epochs: 100                     # Number of epochs for visual prompt tuning
     save_path: 'output/visual_prompt.pth'  # Path to save visual prompt

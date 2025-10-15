@@ -67,8 +67,8 @@ def run_visual_prompt(cfg, model, train_loader, visual_prompt, optimizer, scaler
     mean = torch.tensor(cfg['transforms']['mean'], dtype=torch.float32).view(3,1,1)
     std = torch.tensor(cfg['transforms']['std'], dtype=torch.float32).view(3,1,1)
     for epoch in range(1, cfg['train_visual_prompt']['epochs'] + 1):
-        for batch_idx, (img, labels) in enumerate(train_loader):
-            img, _ = img.to(device), labels.to(device)
+        for batch_idx, (img, scm, labels) in enumerate(train_loader):
+            img, scm, labels = img.to(device), scm.to(device), labels.to(device)
             to_pil = T.ToPILImage()
             # Save original images for visualization
             '''if epoch == cfg['train_visual_prompt']['epochs'] and batch_idx == 0:
@@ -85,6 +85,7 @@ def run_visual_prompt(cfg, model, train_loader, visual_prompt, optimizer, scaler
             with torch.amp.autocast("cuda", enabled=scaler is not None):
                 #attack_img = torch.clamp(img + visual_prompt, 0, 1)
                 gamma = torch.rand(img.size(0), 1, 1, 1).to(device) * 0.5  # Random gamma in [0, 0.5]
+                # gamma = torch.rand(img.size(0), 1).to(device) * 0.5  # Random gamma in [0, 0.5]
                 attack_img = (1 - gamma) * img + gamma * visual_prompt
                 # Save attack_img for visualization (for entire last batch)
                 '''if epoch == cfg['train_visual_prompt']['epochs'] and batch_idx == 0:
@@ -120,11 +121,13 @@ def run_visual_prompt(cfg, model, train_loader, visual_prompt, optimizer, scaler
         log.write(f"Epoch [{epoch}/{cfg['train_visual_prompt']['epochs']}], Loss: {loss.item():.4f}\n", is_file=1)
 
     prompt_save_path = cfg['train_visual_prompt']['save_path']
-    torch.save(visual_prompt, os.path.join(prompt_save_path, f'visual_prompt.pth'))
+    torch.save(visual_prompt, prompt_save_path)
 
     # Save visual prompt as an image for visualization
     to_pil = T.ToPILImage()
     prompt_img = visual_prompt.squeeze(0).cpu()
     prompt_img = (prompt_img - prompt_img.min()) / (prompt_img.max() - prompt_img.min() + 1e-8)  # Normalize to [0, 1]
     pil_img = to_pil(prompt_img)
+    # Remove .pth from path
+    prompt_save_path = os.path.dirname(prompt_save_path)
     pil_img.save(os.path.join(prompt_save_path, 'visual_prompt.png'))

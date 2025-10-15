@@ -1,9 +1,22 @@
 # UniBiFAS
 
-## Running the Code
+## Training and Evaluation
 To run the project, use the following command:
 ```bash
 python main.py --config configs/unibifas.yaml --op_dir ./output --source OCI --target M
+```
+### Unseen visual prompt
+1. Pre-train and save the model:
+```bash
+python main.py --config configs/unibifas.yaml --op_dir ./output --source OM --target DHU --save_ckpt
+```
+2. Train the visual prompt with fixed model:
+```bash
+python main.py --config configs/unibifas.yaml --op_dir ./output --source OM --target DHU --visual_prompt_mode train
+```
+3. Fine-tune the model with learned visual prompt:
+```bash
+python main.py --config configs/finetune.yaml --op_dir ./output --source OM --target DHU --visual_prompt_mode finetune
 ```
 
 ## TODO

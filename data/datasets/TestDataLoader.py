@@ -127,16 +127,19 @@ class TestFASDataset(Dataset):
             
             # Remove singleton dimensions (e.g., (1,1,3) -> (1,3) -> (3,))
             processed_img = np.squeeze(processed_img)
-            # processed_img *= 255.0  # Scale to [0, 1] if in [0, 0.0039]. For visualization only!!!
+            # print(processed_img)
                         
             # Convert data type to uint8 if it's float
             if processed_img.dtype == np.float32 or processed_img.dtype == np.float64:
+                # if processed_img.max() < 0.1:
+                #     processed_img *= 255.0  # Scale to [0, 1] if in [0, 0.0039]. For visualization only!!! Impact performance
                 # Assume values are in range [0,1] and scale to [0,255]
                 if processed_img.max() <= 1.0:
                     processed_img = (processed_img * 255).astype(np.uint8)
                 else:
                     # Values might already be in [0,255] range but stored as float
-                    processed_img = np.clip(processed_img, 0, 255).astype(np.uint8)
+                    # processed_img = np.clip(processed_img, 0, 255).astype(np.uint8)
+                    processed_img = (processed_img / 255).astype(np.uint8) # Performance improvement for DHU
             elif processed_img.dtype != np.uint8:
                 # Convert other integer types to uint8
                 processed_img = processed_img.astype(np.uint8)

@@ -13,7 +13,7 @@ def train(cfg, log):
     print('\n--- Loading Model ---')
     model = BuildModel(cfg).to(device)
 
-    if cfg.get('visual_prompt_mode') and cfg['visual_prompt_mode'] == 'stage1':
+    if cfg.get('visual_prompt_mode') and cfg['visual_prompt_mode'] == 'train':
         print('\n--- Visual Prompt Tuning Stage 1 ---')
         train_loader = BuildLoader(cfg, isTrain=False, isTrainVisualPrompt=True, log=log)
 
@@ -24,9 +24,8 @@ def train(cfg, log):
         optimizer = torch.optim.AdamW([visual_prompt], lr=cfg['train_visual_prompt']['lr'], weight_decay=cfg['train_visual_prompt']['weight_decay'])
         scaler = torch.amp.GradScaler('cuda') if cfg['train']['amp'] else None
 
-        if cfg.get('ckpt'):
-            ckpt = torch.load(cfg['ckpt'])
-            model.load_state_dict(ckpt['state_dict'])
+        ckpt = torch.load(cfg['train']['save_path'])
+        model.load_state_dict(ckpt['state_dict'])
 
         run_visual_prompt(
             cfg,
@@ -41,6 +40,71 @@ def train(cfg, log):
 
         hter, auc, tpr_fpr = 0.0, 0.0, 0.0  # Dummy values
 
+    elif cfg.get('visual_prompt_mode') and cfg['visual_prompt_mode'] == 'finetune':
+        print('\n--- Fine-tuning Entire Model Stage 2 ---')
+        # Load data
+        train_loader = BuildLoader(cfg, isTrain=True, isFineTune=True, log=log)
+        val_loader = BuildLoader(cfg, isTrain=False, log=log)
+
+        # Check which parameters are trainable
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Model created. Trainable parameters: {trainable_params / 1e6:.2f}M")
+        #print("Trainable parameters should only be in the HierarchicalPromptLearner.")
+
+        criterion = {
+            'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b']['params']),
+            'cls_a': getattr(torch.nn, cfg['losses']['cls_a']['name'])(**cfg['losses']['cls_a']['params']),
+            'cls_art': getattr(torch.nn, cfg['losses']['cls_art']['name'])(**cfg['losses']['cls_art']['params']),
+            'seg': getattr(torch.nn, cfg['losses']['seg']['name'])(**cfg['losses']['seg']['params'])
+        }
+
+        optimizer = make_optimizer(cfg, model, log)
+        scheduler = create_lr_scheduler(optimizer, **cfg['scheduler']['params'])
+        scaler = torch.amp.GradScaler('cuda') if cfg['train']['amp'] else None
+
+        # Load if checkpoint is provided
+        ckpt = torch.load(cfg['train']['save_path'])
+        # model.load_state_dict(ckpt['state_dict'], strict=False)
+        # 1. Load the state dictionary from the checkpoint
+        pretrained_dict = ckpt['state_dict']
+
+        # 2. Get the state dictionary of the new, larger model
+        model_dict = model.state_dict()
+
+        # 3. Identify the keys from the pretrained model that we want to keep.
+        # We keep a key if it exists in the new model AND its shape is the same.
+        pretrained_dict = {
+            k: v for k, v in pretrained_dict.items() 
+            if k in model_dict and v.shape == model_dict[k].shape
+        }
+
+        # 4. Update the new model's dictionary with the weights we're keeping.
+        model_dict.update(pretrained_dict)
+
+        # 5. Load the updated, combined state dictionary into the new model.
+        model.load_state_dict(model_dict)
+        # optimizer.load_state_dict(ckpt['optimizer'])
+        # scheduler.load_state_dict(ckpt['scheduler'])
+        start_epoch = int(ckpt['epoch'] + 1)  # Continue from next epoch
+        # if cfg['train']['amp']:
+        #     scaler.load_state_dict(ckpt["scaler"])
+        log.write(f'\nLoaded checkpoint from epoch {ckpt["epoch"]}, continuing from epoch {start_epoch}\n', is_file = 1)
+
+
+        hter, auc, tpr_fpr = run(
+            cfg,
+            model,
+            train_loader,
+            val_loader,
+            optimizer,
+            scheduler,
+            scaler,
+            criterion,
+            device,
+            log,
+            start_epoch
+        )
+    
     else:
         # Load data
         train_loader = BuildLoader(cfg, isTrain=True, log=log)
