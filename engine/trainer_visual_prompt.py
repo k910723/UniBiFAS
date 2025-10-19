@@ -62,7 +62,7 @@ def run_visual_prompt(cfg, model, train_loader, visual_prompt, optimizer, scaler
         param.requires_grad = False
 
     # visual_prompt.to(device)
-    criterion = ContrastiveLoss()
+    criterion = ContrastiveLoss(temp=cfg['train_visual_prompt']['temp'], lambda_known=cfg['train_visual_prompt']['lambda_known'])
 
     mean = torch.tensor(cfg['transforms']['mean'], dtype=torch.float32).view(3,1,1)
     std = torch.tensor(cfg['transforms']['std'], dtype=torch.float32).view(3,1,1)
@@ -85,8 +85,9 @@ def run_visual_prompt(cfg, model, train_loader, visual_prompt, optimizer, scaler
             with torch.amp.autocast("cuda", enabled=scaler is not None):
                 #attack_img = torch.clamp(img + visual_prompt, 0, 1)
                 gamma = torch.rand(img.size(0), 1, 1, 1).to(device) * 0.5  # Random gamma in [0, 0.5]
-                # gamma = torch.rand(img.size(0), 1).to(device) * 0.5  # Random gamma in [0, 0.5]
-                attack_img = (1 - gamma) * img + gamma * visual_prompt
+                # attack_img = (1 - gamma) * img + gamma * visual_prompt
+                attack_img = img + gamma * visual_prompt
+                # attack_img = torch.clamp(attack_img, 0, 1)
                 # Save attack_img for visualization (for entire last batch)
                 '''if epoch == cfg['train_visual_prompt']['epochs'] and batch_idx == 0:
                     to_pil = T.ToPILImage()

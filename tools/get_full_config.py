@@ -38,7 +38,13 @@ def GetCfg():
         
 
     cfg['now_time'] = datetime.now().strftime("%Y%m%d-%H%M%S")
-    cfg['exp_name'] = f"{cfg['model']['mode']}_{cfg['dataset']['source']}_{cfg['dataset']['target']}_{cfg['now_time']}"
+
+    if args_dict['visual_prompt_mode'] == 'train':
+        cfg['exp_name'] = f"VP_train_{cfg['dataset']['source']}_{cfg['dataset']['target']}_{cfg['now_time']}"
+    elif args_dict['visual_prompt_mode'] == 'finetune':
+        cfg['exp_name'] = f"Finetune_{cfg['dataset']['source']}_{cfg['dataset']['target']}_{cfg['now_time']}"
+    else:
+        cfg['exp_name'] = f"{cfg['model']['mode']}_{cfg['dataset']['source']}_{cfg['dataset']['target']}_{cfg['now_time']}"
 
     # print(json.dumps(cfg, indent=4))
     return cfg

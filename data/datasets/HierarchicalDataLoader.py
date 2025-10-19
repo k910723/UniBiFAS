@@ -201,8 +201,9 @@ class HierarchicalFasDataset(Dataset):
 
         # Finetune mode: overlay visual prompt on real images
         if self.finetune and is_fake:
-            gamma = torch.rand(1).item() * 0.5
-            attack_image = (1 - gamma) * primary_image_tensor + gamma * self.visual_prompt
+            gamma = torch.rand(1).item() * 0.5 # Random gamma in [0, 0.5]
+            # attack_image = (1 - gamma) * primary_image_tensor + gamma * self.visual_prompt
+            attack_image = primary_image_tensor + gamma * self.visual_prompt
             # attack_image = torch.clamp(attack_image, 0, 1)
             # Absolute difference as SCM
             scm_image_tensor = torch.abs(primary_image_tensor - attack_image)
