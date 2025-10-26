@@ -11,12 +11,14 @@ class ContrastiveLoss(torch.nn.Module):
     Implements the contrastive loss using high-level features for spoof/live
     and mid-level features for known attack types.
     """
-    def __init__(self, temp=0.7, lambda_known=0.5):
+    def __init__(self, temp=0.7, lambda_known=0.5, lambda_artifact=0.3):
         super().__init__()
         self.temp = temp
         self.lambda_known = lambda_known
+        self.lambda_artifact = lambda_artifact
 
-    def forward(self, f_v, f_v_mid, t_live, t_spoof, t_known_list):
+
+    def forward(self, f_v, f_v_mid, t_live, t_spoof, t_known_list, t_artifact_list):
         """
         Calculates the loss based on the formula:
         L_con = -log(exp(sim(f_v, t_spoof)) / (exp(sim(f_v, t_live)) + exp(sim(f_v_mid, t_known))))
@@ -34,22 +36,27 @@ class ContrastiveLoss(torch.nn.Module):
         t_live = F.normalize(t_live, dim=1)
         t_spoof = F.normalize(t_spoof, dim=1)
         t_known_list = [F.normalize(t_known, dim=1) for t_known in t_known_list]
+        t_artifact_list = [F.normalize(t_artifact, dim=1) for t_artifact in t_artifact_list]
 
         # Compute cosine similarities
         sim_live = torch.matmul(f_v, t_live.t())  / self.temp # [B, 1]
         sim_spoof = torch.matmul(f_v, t_spoof.t()) / self.temp # [B, 1]
         # sim_live_mid = torch.matmul(f_v_mid, t_known_list[0].t()) / self.temp  # [B, 1]
         sim_known = torch.cat([torch.matmul(f_v_mid, t_known.t()) for t_known in t_known_list], dim=1)  # [B, K]
+        sim_artifact = torch.cat([torch.matmul(f_v_mid, t_artifact.t()) for t_artifact in t_artifact_list], dim=1)  # [B, K]
 
         # Compute contrastive loss
         exp_sim_spoof = torch.exp(sim_spoof)
         exp_sim_live = torch.exp(sim_live)
         exp_sim_known = torch.exp(sim_known).sum(dim=1, keepdim=True)  # Sum over known attacks
+        exp_sim_artifact = torch.exp(sim_artifact).sum(dim=1, keepdim=True)  # Sum over artifact types
 
         # loss = -torch.log(exp_sim_spoof / (exp_sim_live + exp_sim_known + 1e-8))  # [B, 1]
         loss_live = -torch.log(exp_sim_spoof / (exp_sim_live + 1e-8))  # [B, 1]
         loss_known = -torch.log(exp_sim_spoof / (exp_sim_known + 1e-8))  # [B, 1]
-        loss = loss_live + self.lambda_known * loss_known  # [B, 1]
+        loss_artifact = -torch.log(exp_sim_spoof / (exp_sim_artifact + 1e-8))  # [B, 1]
+        
+        loss = loss_live + self.lambda_known * loss_known + self.lambda_artifact * loss_artifact  # [B, 1]
         return loss.mean()
 
 
@@ -62,7 +69,7 @@ def run_visual_prompt(cfg, model, train_loader, visual_prompt, optimizer, scaler
         param.requires_grad = False
 
     # visual_prompt.to(device)
-    criterion = ContrastiveLoss(temp=cfg['train_visual_prompt']['temp'], lambda_known=cfg['train_visual_prompt']['lambda_known'])
+    criterion = ContrastiveLoss(temp=cfg['train_visual_prompt']['temp'], lambda_known=cfg['train_visual_prompt']['lambda_known'], lambda_artifact=cfg['train_visual_prompt']['lambda_artifact'])
 
     mean = torch.tensor(cfg['transforms']['mean'], dtype=torch.float32).view(3,1,1)
     std = torch.tensor(cfg['transforms']['std'], dtype=torch.float32).view(3,1,1)
@@ -71,33 +78,34 @@ def run_visual_prompt(cfg, model, train_loader, visual_prompt, optimizer, scaler
             img, scm, labels = img.to(device), scm.to(device), labels.to(device)
             to_pil = T.ToPILImage()
             # Save original images for visualization
-            '''if epoch == cfg['train_visual_prompt']['epochs'] and batch_idx == 0:
-                os.makedirs(cfg['train_visual_prompt']['save_path'], exist_ok=True)
+            if epoch == cfg['train_visual_prompt']['epochs'] and batch_idx == 0:
+                os.makedirs(f"{os.path.dirname(cfg['train_visual_prompt']['save_path'])}/visualization", exist_ok=True)
                 for i in range(img.size(0)):
                     # The img is normalized with given mean and std
                     save_img = img[i].detach().cpu().clone()
                     save_img = save_img * std + mean
                     save_img = torch.clamp(save_img, 0., 1.)
                     pil_img = to_pil(save_img)
-                    pil_img.save(os.path.join(cfg['train_visual_prompt']['save_path'], f'original_img_{i}.png'))'''
+                    pil_img.save(os.path.join(f"{os.path.dirname(cfg['train_visual_prompt']['save_path'])}/visualization", f'original_img_{i}.png'))
 
             # --- Forward Pass ---
             with torch.amp.autocast("cuda", enabled=scaler is not None):
                 #attack_img = torch.clamp(img + visual_prompt, 0, 1)
                 gamma = torch.rand(img.size(0), 1, 1, 1).to(device) * 0.5  # Random gamma in [0, 0.5]
                 # attack_img = (1 - gamma) * img + gamma * visual_prompt
-                attack_img = img + gamma * visual_prompt
-                # attack_img = torch.clamp(attack_img, 0, 1)
+                # attack_img = img + gamma * visual_prompt
+                attack_img = img + visual_prompt
+                attack_img = torch.clamp(attack_img, -2, 2)
                 # Save attack_img for visualization (for entire last batch)
-                '''if epoch == cfg['train_visual_prompt']['epochs'] and batch_idx == 0:
+                if epoch == cfg['train_visual_prompt']['epochs'] and batch_idx == 0:
                     to_pil = T.ToPILImage()
-                    os.makedirs(cfg['train_visual_prompt']['save_path'], exist_ok=True)
+                    os.makedirs(f"{os.path.dirname(cfg['train_visual_prompt']['save_path'])}/visualization", exist_ok=True)
                     for i in range(min(5, attack_img.size(0))):  # Save first 5 images
                         save_img = attack_img[i].detach().cpu().clone()
                         save_img = save_img * std + mean
                         save_img = torch.clamp(save_img, 0., 1.)
                         pil_img = to_pil(save_img)
-                        pil_img.save(os.path.join(cfg['train_visual_prompt']['save_path'], f'attack_img_{i}.png'))'''
+                        pil_img.save(os.path.join(f"{os.path.dirname(cfg['train_visual_prompt']['save_path'])}/visualization", f'attack_img_{i}.png'))
                 outputs = model(attack_img)
                 img_feat_norm, cls_tokens, patch_tokens, text_feat_b, text_feat_a, text_feat_art = outputs
                 
@@ -106,7 +114,8 @@ def run_visual_prompt(cfg, model, train_loader, visual_prompt, optimizer, scaler
                     cls_tokens[:,1,:], 
                     text_feat_b[0].unsqueeze(0), 
                     text_feat_b[1].unsqueeze(0), 
-                    [text_feat_a[i].unsqueeze(0) for i in range(0, text_feat_a.shape[0])] # 0 is live
+                    [text_feat_a[i].unsqueeze(0) for i in range(0, text_feat_a.shape[0])], # 0 is live
+                    [text_feat_art[i].unsqueeze(0) for i in range(0, text_feat_art.shape[0])]  # 0 is live
                 )
 
             # --- Backward Pass ---

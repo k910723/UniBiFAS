@@ -48,7 +48,7 @@ train:
     epochs: 1000                 # Number of epochs
     print_interval: 1            # Print metrics every N epochs
     amp: True
-    save_path: 'output/checkpoint.pt'
+    save_path: 'output'
 
 train_visual_prompt:
     lr: 1.0e-2                    # Learning rate for visual prompt tuning

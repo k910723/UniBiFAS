@@ -187,7 +187,7 @@ def run(
                     best_AUC,
                     valid_args[5]  # threshold
                 ]
-                save_checkpoint(save_list, is_best, model, optimizer, scheduler, filename=cfg['train']['save_path'])
+                save_checkpoint(save_list, is_best, model, optimizer, scheduler, filename=f"{cfg['train']['save_path']}/{cfg['dataset']['source']}_{cfg['dataset']['target']}_best.pt")
 
             print('\r', end='', flush=True)
             message = (
