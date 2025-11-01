@@ -52,8 +52,8 @@ train_visual_prompt:
     lr: 1.0e-2                    # Learning rate for visual prompt tuning
     weight_decay: 1.0e-3          # Weight decay for visual prompt tuning
     temp: 0.2                     # Temperature for contrastive loss
-    lambda_known: 0.7             # Weight for known samples in contrastive loss
-    lambda_artifact: 0.1          # Weight for artifact samples in contrastive loss
+    lambda_known: 0.5             # Weight for known samples in contrastive loss
+    lambda_artifact: 0.3          # Weight for artifact samples in contrastive loss
     epochs: 100                     # Number of epochs for visual prompt tuning
     save_path: 'output/visual_prompt.pth'  # Path to save visual prompt
 
