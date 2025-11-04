@@ -166,8 +166,9 @@ def run(
 
         # --- End of Epoch: Validation and Logging ---
         if epoch % cfg['train']['print_interval'] == 0 or epoch == cfg['train']['epochs']:
-            # Run validation
-            valid_args = do_eval(val_loader, model, device, log)
+            # Run validation with inference weights if available
+            inference_weights = cfg.get('inference_weights', None)
+            valid_args = do_eval(val_loader, model, device, log, inference_weights)
 
             is_best = valid_args[3] < best_HTER or (valid_args[3] == best_HTER and valid_args[4] > best_AUC)
             if is_best:

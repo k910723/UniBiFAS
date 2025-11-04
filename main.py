@@ -2,15 +2,16 @@ import yaml, os, torch, random, shutil, warnings
 import numpy as np
 
 from utils import Logger
-from tools import train, GetCfg 
+from tools import train, GetCfg, log_randomized_params
 
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+#torch.backends.cudnn.deterministic = True
+#torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.benchmark = True  # Enable benchmark for better performance with randomness
 warnings.filterwarnings('ignore', category = UserWarning)
 warnings.filterwarnings("ignore", message="Failed to load image Python extension")
 
 if __name__ == '__main__':
-    cfg = GetCfg()  # get all config
+    cfg = GetCfg()  # get all config (seed is already set if randomization is enabled)
 
     expSavePath = os.path.join(cfg['op_dir'], cfg['exp_name'])
     if not os.path.exists(expSavePath):
@@ -31,6 +32,10 @@ if __name__ == '__main__':
     log = Logger()
     log.open(logSavePath)
 
+    # Log randomized parameters if randomization is enabled
+    if cfg.get('randomized', False):
+        log_randomized_params(cfg, log)
+
     resultName = f"{cfg['exp_name']}_result.csv"
     resultSavePath = os.path.join(expSavePath, resultName)
     with open(resultSavePath, 'a') as f:
@@ -41,10 +46,10 @@ if __name__ == '__main__':
 
     for i in range(cfg['base']['repeat_num']):
         # To reproduce results
-        torch.manual_seed(i)
-        np.random.seed(i)
-        random.seed(i)
-        torch.cuda.manual_seed(i)
+        #torch.manual_seed(i)
+        #np.random.seed(i)
+        #random.seed(i)
+        #torch.cuda.manual_seed(i)
 
         hter, auc, tpr_fpr = train(cfg, log)
 

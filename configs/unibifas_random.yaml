@@ -1,0 +1,137 @@
+base:
+    repeat_num: 1
+
+dataset:
+    root_path: '/shared/shared/FAS_AUG'
+    test_path: '/shared/shared/'
+    source: 'c'    # c, i, o, m, ci, ..., cio, ..., ciom
+    target: 'i'    # c, i, o, m, ci, ..., cio, ..., ciom
+    batch_size: 32
+    num_workers: 8
+    classnames:
+        - 'a photo of a real face'
+        - 'a photo of a spoof face'
+    # Hierarchical classification labels
+    attack_types:
+        - 'a photo of a real face'
+        - 'a photo of a print attack'
+        - 'a photo of a replay attack'
+    artifact_types:
+        - 'a face with realistic texture'
+        - 'a face with bnhalftone artifact'
+        - 'a face with distortion artifact'
+        - 'a face with sfchalftone artifact'
+        - 'a face with moire pattern artifact'
+        - 'a face with reflection artifact'
+
+transforms:
+    imgSize: 224
+    mean:
+        - 0.535
+        - 0.419
+        - 0.358
+    std:
+        - 0.276
+        - 0.251
+        - 0.242
+
+model:
+    mode: UniBiFAS 
+    backbone: ViT-B/16
+    n_ctx: 
+        type: randint
+        min: 2
+        max: 8                      # Number of learnable tokens per prompt (random between 2-8)
+    prompt_depth: 12                # Max 12, Min 1 (random between 6-12)
+    interaction_layers:
+        type: interaction_layers    # Special handler for interaction layers
+        layer_min: 6                # Minimum layer index
+        layer_max: 11               # Maximum layer index
+        num_selections: 2           # Always select exactly 2 layers
+
+train:
+    epochs: 30                    # Number of epochs
+    print_interval: 1               # Print metrics every N epochs
+    amp: True
+    save_path: 'output/checkpoint.pt'
+
+train_visual_prompt:
+    lr: 
+        type: loguniform
+        min: 1.0e-3
+        max: 1.0e-1                 # Learning rate for visual prompt tuning (log scale)
+    weight_decay: 
+        type: loguniform
+        min: 1.0e-4
+        max: 1.0e-2                 # Weight decay for visual prompt tuning (log scale)
+    epochs: 100                     # Number of epochs for visual prompt tuning
+    save_path: 'output/visual_prompt.pth'  # Path to save visual prompt
+
+optimizer:
+  name: Adam
+  params:
+    lr: 
+        type: loguniform
+        min: 1.0e-7
+        max: 1.0e-5               # Learning rate (log scale)
+    weight_decay: 
+        type: loguniform
+        min: 1.0e-7
+        max: 1.0e-5               # Weight decay (log scale)
+
+scheduler:
+    params:
+        use: False
+        step_each_epoch: 100
+        total_epochs: 50
+        warmup: True
+        warmup_epochs: 2
+        warmup_factor: 1.0e-3
+
+loss_weights:
+    binary: 
+        type: uniform
+        min: 1.0
+        max: 2.0                  # Binary classification loss weight
+    attack: 
+        type: uniform
+        min: 0.5
+        max: 1.0                  # Attack type classification loss weight
+    artifact: 
+        type: uniform
+        min: 0.5
+        max: 1.0                  # Artifact type classification loss weight
+    segmentation: 
+        type: uniform
+        min: 0.5
+        max: 1.0                  # Segmentation loss weight
+
+inference_weights:
+    binary:
+        type: uniform
+        min: 0.3
+        max: 0.5                  # Binary logit weight for inference spoof score
+    attack:
+        type: uniform
+        min: 0.3
+        max: 0.4                  # Attack logit weight for inference spoof score
+    artifact:
+        type: computed_remainder  # Computed as 1.0 - binary - attack to ensure sum = 1.0
+
+losses:
+    cls_b:
+        name: CrossEntropyLoss
+        params:
+            reduction: mean
+    cls_a:
+        name: CrossEntropyLoss
+        params:
+            reduction: mean
+    cls_art:
+        name: CrossEntropyLoss
+        params:
+            reduction: mean
+    seg:
+        name: L1Loss
+        params:
+            reduction: mean

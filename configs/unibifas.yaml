@@ -2,11 +2,11 @@ base:
     repeat_num: 1
 
 dataset:
-    root_path: '/shared/FAS_AUG'
-    test_path: '/shared'
+    root_path: '/shared/shared/FAS_AUG'
+    test_path: '/shared/shared/'
     source: 'c'    # c, i, o, m, ci, ..., cio, ..., ciom
     target: 'i'    # c, i, o, m, ci, ..., cio, ..., ciom
-    batch_size: 32
+    batch_size: 128
     num_workers: 8
     classnames:
         - 'a photo of a real face'
@@ -38,12 +38,12 @@ transforms:
 model:
     mode: UniBiFAS 
     backbone: ViT-B/16
-    n_ctx: 4                     # Number of learnable tokens per prompt
-    prompt_depth: 12             # Max 12, Min 1 ,for 1 it will act asa shallow MaPLe (J = 1)
-    interaction_layers: [8, 10]   # Layers 0-3: V->T, 4-7: V<->T, 8-11: T->V
+    n_ctx: 8                     # Number of learnable tokens per prompt
+    prompt_depth: 12             # Max 12, Min 1 ,for 1 it will act as a shallow MaPLe (J = 1)
+    interaction_layers: [7, 10]   # Layers 0-3: V->T, 4-7: V<->T, 8-11: T->V
 
 train:
-    epochs: 1000                 # Number of epochs
+    epochs: 30                 # Number of epochs
     print_interval: 1            # Print metrics every N epochs
     amp: True
     save_path: 'output/checkpoint.pt'
@@ -57,23 +57,28 @@ train_visual_prompt:
 optimizer:
   name: Adam
   params:
-    lr: 1.0e-6
-    weight_decay: 1.0e-6
+    lr: 1.0e-4                    # Increased from 2.5e-6 (40x higher)
+    weight_decay: 1.0e-4          # Increased regularization to prevent overfitting
 
 scheduler:
     params:
-        use: False
+        use: True                  # Enable learning rate scheduling
         step_each_epoch: 100
-        total_epochs: 50
+        total_epochs: 30           # Match training epochs
         warmup: True
-        warmup_epochs: 2
-        warmup_factor: 1.0e-3
+        warmup_epochs: 3           # Gradual warmup over 3 epochs
+        warmup_factor: 1.0e-2      # Start from lr * 0.01
 
 loss_weights:
     binary: 1.0
     attack: 0.5
-    artifact: 0.3
+    artifact: 0.5
     segmentation: 0.5
+
+inference_weights:
+    binary: 0.4
+    attack: 0.4
+    artifact: 0.2
 
 losses:
     cls_b:

@@ -1,8 +1,11 @@
-import sys, yaml, json
+import sys, yaml, json, random
+import numpy as np
+import torch
 from datetime import datetime
 
 sys.path.append('.')
 from args import get_parser
+from .random_config import randomize_config
 
 def GetCfg():
     parser = get_parser()
@@ -15,6 +18,29 @@ def GetCfg():
 
     with open(cfgPath, 'r') as cfgFile:
         cfg = yaml.safe_load(cfgFile)
+    
+    # Randomize config parameters if specified
+    if args_dict.get('randomize', False):
+        # Set seed before randomization for reproducibility
+        if args_dict.get('seed') is not None:
+            seed = args_dict['seed']
+        else:
+            # Generate a random seed if not provided
+            seed = random.randint(0, 2**32 - 1)
+        
+        # Set the seed for all random number generators
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        
+        # Store seed in config
+        cfg['random_seed'] = seed
+        
+        # Now randomize the config with the set seed
+        cfg = randomize_config(cfg)
+        cfg['randomized'] = True
+    else:
+        cfg['randomized'] = False
     
     cfg['config'] = args_dict['config']
     cfg['device'] = args_dict['device']
