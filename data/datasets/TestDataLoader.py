@@ -45,7 +45,10 @@ class TestFASDataset(Dataset):
             'M': 'MSU',
             'D': '3DMAD',
             'H': 'HKBUv1+',
-            'U': 'casia_3d'
+            'U': 'casia_3d',
+            'paper_glasses' : 'paper_glasses_RGB',
+            'mask_silicone' : 'mask_silicone_RGB',
+            'funny_eyes' : 'funny_eyes_RGB',
         }
 
         all_live_images = []
@@ -61,11 +64,16 @@ class TestFASDataset(Dataset):
             base_name = self.protocol_map[p]
             if p == 'D' or p == 'H' or p == 'U':
                 data_path = self.root_dir / "3Dmask"
+                live_path = data_path / f"{base_name}_images_live.npy"
+                spoof_path = data_path / f"{base_name}_images_spoof.npy"
+            elif p in ['paper_glasses', 'mask_silicone', 'funny_eyes']:
+                data_path = self.root_dir / "padisi" / "partial" / "test"
+                live_path = data_path / "live_RGB.npy"
+                spoof_path = data_path / f"{base_name}.npy"
             else:
                 data_path = self.root_dir / "domain-generalization"
-
-            live_path = data_path / f"{base_name}_images_live.npy"
-            spoof_path = data_path / f"{base_name}_images_spoof.npy"
+                live_path = data_path / f"{base_name}_images_live.npy"
+                spoof_path = data_path / f"{base_name}_images_spoof.npy"
 
             if live_path.exists():
                 live_data = np.load(live_path)

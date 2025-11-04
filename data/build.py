@@ -32,7 +32,7 @@ def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, isFineTune=False, 
         # --- TRAINING LOADER ---
         # Uses HierarchicalFasDataset for source domains
         print('\n--- Loading Source Domains for Training ---')
-        abbr2datasetType = {'o': 'Oulu', 'c': 'Casia', 'm': 'Msu', 'i': 'Idiap', 'b': 'Celeb'}
+        abbr2datasetType = {'o': 'Oulu', 'c': 'Casia', 'm': 'Msu', 'i': 'Idiap', 'b': 'Celeb', 'p' : 'partial'}
         #scm_transforms = FasTransforms(cfg, isTrain) # SCM transforms only needed for training
         
         domain_keys = cfg['dataset']['source'].lower()
@@ -60,7 +60,7 @@ def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, isFineTune=False, 
                 root_dir=dataset_path,
                 transform=simple_transforms,
                 scm_transform=simple_transforms,
-                live_only=isTrainVisualPrompt,
+                # live_only=isTrainVisualPrompt,
                 finetune=isFineTune,
                 visual_prompt_path=cfg['train_visual_prompt']['save_path'] if isFineTune else None,
             )
@@ -84,6 +84,8 @@ def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, isFineTune=False, 
         # Create the protocol list from the domain keys string
         if ' ' in domain_keys:
             protocol = domain_keys.split()
+        elif '_' in list(domain_keys):
+            protocol = [domain_keys]
         else:
             protocol = list(domain_keys)
 

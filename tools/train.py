@@ -24,7 +24,7 @@ def train(cfg, log):
         optimizer = torch.optim.AdamW([visual_prompt], lr=cfg['train_visual_prompt']['lr'], weight_decay=cfg['train_visual_prompt']['weight_decay'])
         scaler = torch.amp.GradScaler('cuda') if cfg['train']['amp'] else None
 
-        ckpt = torch.load(cfg['train']['save_path'])
+        ckpt = torch.load(f"{cfg['train']['save_path']}/{cfg['dataset']['source']}_{cfg['dataset']['target']}_best.pt")
         model.load_state_dict(ckpt['state_dict'])
 
         run_visual_prompt(
@@ -63,7 +63,7 @@ def train(cfg, log):
         scaler = torch.amp.GradScaler('cuda') if cfg['train']['amp'] else None
 
         # Load if checkpoint is provided
-        ckpt = torch.load(cfg['train']['save_path'])
+        ckpt = torch.load(f"{cfg['train']['save_path']}/{cfg['dataset']['source']}_{cfg['dataset']['target']}_best.pt")
         # model.load_state_dict(ckpt['state_dict'], strict=False)
         # 1. Load the state dictionary from the checkpoint
         pretrained_dict = ckpt['state_dict']
