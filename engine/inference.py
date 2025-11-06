@@ -9,7 +9,7 @@ from sklearn.metrics import roc_auc_score
 from utils import AverageMeter, accuracy
 from utils.statistic import get_EER_states, get_HTER_at_thr, calculate, calculate_threshold, Find_Optimal_Cutoff
 
-def do_eval(val_loader, model, device, log, inference_weights=None):
+def do_eval(val_loader, model, device, log, inference_weights=None, cfg=None):
     """
         Eval the FAS model on the target data.
         The function evaluates the model on the target data and return TPR@FPR, HTER
@@ -24,6 +24,11 @@ def do_eval(val_loader, model, device, log, inference_weights=None):
 
     prob_list = []
     label_list = []
+    
+    # Check model mode to determine inference strategy
+    model_mode = cfg['model'].get('mode', 'UniBiFAS') if cfg is not None else 'UniBiFAS'
+    use_attack_inference = model_mode in ['UniBiFAS', 'UniBiFAS_TI']  # Full hierarchical
+    use_artifact_inference = model_mode not in ['UniBiFAS_uni_IT', 'UniBiFAS_uni_TI']  # All except unidirectional variants
 
     model.eval()
     with torch.no_grad():
@@ -42,39 +47,57 @@ def do_eval(val_loader, model, device, log, inference_weights=None):
             logit_scale = model.logit_scale.exp()
             
             # Compute similarity scores with all text features
-            # text_feat_b: [2, dim] - binary (real, spoof)
-            # text_feat_a: [num_attacks, dim] - attack-specific text features
-            # text_feat_art: [num_artifacts, dim] - artifact-specific text features
-            
             logits_binary = logit_scale * img_feat_norm @ text_feat_b.t()  # [batch, 2]
-            logits_attack = logit_scale * img_feat_norm @ text_feat_a.t()  # [batch, num_attacks]
-            logits_artifact = logit_scale * img_feat_norm @ text_feat_art.t()  # [batch, num_artifacts]
             
-            # Pool attack and artifact logits to get spoof scores
-            # Max pooling: take the maximum similarity across all spoof types
-            spoof_score_attack = torch.max(logits_attack, dim=1, keepdim=True)[0]  # [batch, 1]
-            spoof_score_artifact = torch.max(logits_artifact, dim=1, keepdim=True)[0]  # [batch, 1]
-            
-            # Combine spoof scores using weighted combination. The weights should sum to 1.0 for proper scaling
-            # Weights for: [binary_spoof, attack, artifact]
-            # Use provided weights or default values
-            if inference_weights is not None:
-                w_binary = inference_weights['binary']
-                w_attack = inference_weights['attack']
-                w_artifact = inference_weights['artifact']
+            # Determine which hierarchical features to use
+            if use_attack_inference and use_artifact_inference:
+                # Full hierarchical inference (UniBiFAS, UniBiFAS_TI)
+                logits_attack = logit_scale * img_feat_norm @ text_feat_a.t()  # [batch, num_attacks]
+                logits_artifact = logit_scale * img_feat_norm @ text_feat_art.t()  # [batch, num_artifacts]
+                
+                spoof_score_attack = torch.max(logits_attack, dim=1, keepdim=True)[0]  # [batch, 1]
+                spoof_score_artifact = torch.max(logits_artifact, dim=1, keepdim=True)[0]  # [batch, 1]
+                
+                # Use provided weights or default values
+                if inference_weights is not None:
+                    w_binary = inference_weights['binary']
+                    w_attack = inference_weights['attack']
+                    w_artifact = inference_weights['artifact']
+                else:
+                    w_binary = 0.4
+                    w_attack = 0.3
+                    w_artifact = 0.3
+                
+                spoof_score_combined = (
+                    w_binary * logits_binary[:, 1:2] +  # spoof score from binary text
+                    w_attack * spoof_score_attack + 
+                    w_artifact * spoof_score_artifact
+                )  # [batch, 1]
+                
+                logits = torch.cat([logits_binary[:, 0:1], spoof_score_combined], dim=1)  # [batch, 2]
+                
+            elif use_artifact_inference:
+                # Artifact only inference (UniBiFAS_bi_IT, UniBiFAS_bi_TI)
+                logits_artifact = logit_scale * img_feat_norm @ text_feat_art.t()  # [batch, num_artifacts]
+                spoof_score_artifact = torch.max(logits_artifact, dim=1, keepdim=True)[0]  # [batch, 1]
+                
+                # Use provided weights or default (binary + artifact only)
+                if inference_weights is not None:
+                    w_binary = inference_weights['binary']
+                    w_artifact = inference_weights['artifact']
+                else:
+                    w_binary = 0.5
+                    w_artifact = 0.5
+                
+                spoof_score_combined = (
+                    w_binary * logits_binary[:, 1:2] +  # spoof score from binary text
+                    w_artifact * spoof_score_artifact
+                )  # [batch, 1]
+                
+                logits = torch.cat([logits_binary[:, 0:1], spoof_score_combined], dim=1)  # [batch, 2]
             else:
-                w_binary = 0.4
-                w_attack = 0.3
-                w_artifact = 0.3
-            
-            spoof_score_combined = (
-                w_binary * logits_binary[:, 1:2] +  # spoof score from binary text
-                w_attack * spoof_score_attack + 
-                w_artifact * spoof_score_artifact
-            )  # [batch, 1]
-            
-            # Construct final binary logits: [real_score, combined_spoof_score]
-            logits = torch.cat([logits_binary[:, 0:1], spoof_score_combined], dim=1)  # [batch, 2]
+                # Binary only inference (UniBiFAS_uni_IT, UniBiFAS_uni_TI)
+                logits = logits_binary  # [batch, 2]
 
             valid_loss = criterion(logits, binary_labels)
             valid_losses.update(valid_loss.item())

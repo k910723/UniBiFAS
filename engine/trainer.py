@@ -89,13 +89,28 @@ def run(
                 # --- 1. Hierarchical Classification Loss Calculation ---
                 logit_scale = model.logit_scale.exp()
                 
+                # Binary loss (always computed)
                 logits_binary = logit_scale * img_feat_norm @ text_feat_b.t()
-                logits_attack = logit_scale * cls_tokens[:,1,:] @ text_feat_a.t()
-                logits_artifact = logit_scale * cls_tokens[:,0,:] @ text_feat_art.t()
-
                 loss_binary = criterion['cls_b'](logits_binary, binary_labels)
-                loss_attack = criterion['cls_a'](logits_attack, attack_labels)
-                loss_artifact = criterion['cls_art'](logits_artifact, artifact_labels)
+                
+                # Check model mode to determine which losses to compute
+                model_mode = cfg['model'].get('mode', 'UniBiFAS')
+                
+                # Attack loss: Only for baseline and TI variants (with full hierarchical guidance)
+                if model_mode in ['UniBiFAS', 'UniBiFAS_TI']:
+                    logits_attack = logit_scale * cls_tokens[:,1,:] @ text_feat_a.t()
+                    loss_attack = criterion['cls_a'](logits_attack, attack_labels)
+                else:
+                    # Simplified variants (bi_IT, bi_TI, uni_IT, uni_TI) don't use attack loss
+                    loss_attack = torch.tensor(0.0, device=device)
+                
+                # Artifact loss: For all except unidirectional variants
+                if model_mode not in ['UniBiFAS_uni_IT', 'UniBiFAS_uni_TI']:
+                    logits_artifact = logit_scale * cls_tokens[:,0,:] @ text_feat_art.t()
+                    loss_artifact = criterion['cls_art'](logits_artifact, artifact_labels)
+                else:
+                    # Unidirectional variants don't use artifact loss
+                    loss_artifact = torch.tensor(0.0, device=device)
 
                 # --- 2. Segmentation Loss Calculation ---
                 # Create zero maps for real images and use SCM for fake images
@@ -168,7 +183,7 @@ def run(
         if epoch % cfg['train']['print_interval'] == 0 or epoch == cfg['train']['epochs']:
             # Run validation with inference weights if available
             inference_weights = cfg.get('inference_weights', None)
-            valid_args = do_eval(val_loader, model, device, log, inference_weights)
+            valid_args = do_eval(val_loader, model, device, log, inference_weights, cfg)
 
             is_best = valid_args[3] < best_HTER or (valid_args[3] == best_HTER and valid_args[4] > best_AUC)
             if is_best:

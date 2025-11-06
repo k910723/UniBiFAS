@@ -1,0 +1,536 @@
+import torch
+import torch.nn as nn
+from clip import clip
+from clip.model import QuickGELU
+from collections import OrderedDict
+import os
+import copy
+from .prompt_templates import *
+
+# =================================================================================
+# Helper Function to Load CLIP
+# =================================================================================
+
+def LoadClip(cfg, zero_shot_model=False):
+    """
+    Loads the CLIP model with custom modifications for prompt learning.
+    """
+    backbone_name = cfg['model']['backbone']
+    model_path = clip._download(clip._MODELS[backbone_name], os.path.expanduser("~/.cache/clip"))
+
+    try:
+        model = torch.jit.load(model_path, map_location=cfg.get('device', 'cpu')).eval()
+        state_dict = None
+    except RuntimeError:
+        state_dict = torch.load(model_path, map_location=cfg.get('device', 'cpu'))
+
+    # Build a modified CLIP model that accepts prompts in its forward pass
+    design_details = {
+        "trainer": 'UniBiFAS', # This key enables prompt inputs in the modified CLIP code
+        "vision_depth": cfg['model']['prompt_depth'],
+        "language_depth": cfg['model']['prompt_depth'],
+        "vision_ctx": cfg['model']['n_ctx'],
+        "language_ctx": cfg['model']['n_ctx']
+    }
+    model = clip.build_model(state_dict or model.state_dict(), design_details)
+    return model
+
+# =================================================================================
+# Core Attention and Prompting Modules
+# =================================================================================
+
+def _get_clones(module, N):
+    return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
+
+class FeaturePreprocessMLP(nn.Module):
+    """MLP to post-process features after LKP modules."""
+    def __init__(self, input_dim, hidden_dim=None, dropout=0.1):
+        super().__init__()
+        if hidden_dim is None:
+            hidden_dim = input_dim * 2
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, input_dim),
+            nn.LayerNorm(input_dim)
+        )
+    
+    def forward(self, x):
+        return x + self.mlp(x)  # Residual connection
+
+class ProjectionMLP(nn.Module):
+    """Enhanced projection with MLP."""
+    def __init__(self, input_dim, output_dim, hidden_dim=None, dropout=0.1):
+        super().__init__()
+        if hidden_dim is None:
+            hidden_dim = max(input_dim, output_dim) * 2
+        
+        self.projection = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, output_dim),
+            nn.LayerNorm(output_dim)
+        )
+    
+    def forward(self, x):
+        return self.projection(x)
+
+class TextEncoder(nn.Module):
+    def __init__(self, clip_model):
+        super().__init__()
+        self.transformer = clip_model.transformer
+        self.positional_embedding = clip_model.positional_embedding
+        self.ln_final = clip_model.ln_final
+        self.text_projection = clip_model.text_projection
+        self.dtype = clip_model.dtype
+
+    def forward(self, prompts, tokenized_prompts, cross_prompts_text_deeper):
+        x = prompts + self.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        combined = [x, cross_prompts_text_deeper]
+        outputs = self.transformer(combined)
+        x = outputs[0]
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = self.ln_final(x).type(self.dtype)
+
+        # x.shape = [batch_size, n_ctx, transformer.width]
+        # take features from the eot embedding (eot_token is the highest number in each sequence)
+        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+
+        return x
+
+class AttentionPooling(nn.Module):
+    """Layer-specific Knowledge Proxy (LKP)."""
+    def __init__(self, hidden_size, num_attention_heads):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_attention_heads)
+        self.ln_1 = nn.LayerNorm(hidden_size)
+        self.ln_2 = nn.LayerNorm(hidden_size)
+
+    def forward(self, token_query, sequence_key, sequence_value):
+        token_query = token_query + self.attn(self.ln_1(token_query), self.ln_1(sequence_key), self.ln_1(sequence_value), need_weights=False)[0]
+        token_query = self.ln_2(token_query)
+        return token_query
+
+class CrossPromptAttention(nn.Module):
+    """Multi-scale Knowledge Mapper."""
+    def __init__(self, hidden_size, encoder_hidden_size, num_attention_heads):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_attention_heads)
+        self.linear_q = nn.Linear(hidden_size, hidden_size)
+        self.linear_k = nn.Linear(encoder_hidden_size, hidden_size)
+        self.linear_v = nn.Linear(encoder_hidden_size, hidden_size)
+        self.ln_1 = nn.LayerNorm(hidden_size)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 4),
+            QuickGELU(),
+            nn.Linear(hidden_size * 4, hidden_size)
+        )
+        self.ln_2 = nn.LayerNorm(hidden_size)
+
+    def forward(self, q, k, v):
+        q_proj = self.linear_q(q)
+        k_proj = self.linear_k(k)
+        v_proj = self.linear_v(v)
+        q_proj = q_proj + self.attn(self.ln_1(q_proj), self.ln_1(k_proj), self.ln_1(v_proj), need_weights=False)[0]
+        q_proj = q_proj + self.ffn(self.ln_2(q_proj))
+        return q_proj
+
+class HierarchicalPromptLearner(nn.Module):
+    """
+    Manages and updates the hierarchical prompts for both vision and text encoders.
+    Supports multiple classification tasks: binary, attack type, and artifact type.
+    
+    Guidance Direction (uni_IT variant): V→T only (No Bidirectional, No T→V)
+    - All layers (0-11): Vision → Text only
+    - Unidirectional: Visual features guide text prompts across all layers
+    - Tests if T→V guidance is necessary at all
+    """
+    def __init__(self, cfg, clip_model):
+        super().__init__()
+        classnames = cfg['dataset']['classnames']
+        attack_types = cfg['dataset'].get('attack_types', ['print attack', 'replay attack', 'mask attack'])
+        artifact_types = cfg['dataset'].get('artifact_types', ['color distortion', 'texture artifact', 'geometric artifact'])
+        
+        self.n_cls_binary = len(classnames)
+        self.n_cls_attack = len(attack_types)
+        self.n_cls_artifact = len(artifact_types)
+        self.n_ctx = cfg['model']['n_ctx']
+        self.prompt_depth = cfg['model']['prompt_depth']
+        
+        # All layers use V→T guidance (no boundaries needed)
+        # No transition layers - uniform V→T across all 12 layers
+        
+        ctx_dim = clip_model.ln_final.weight.shape[0]  # 512
+        vis_dim = 768
+        dtype = clip_model.dtype
+        
+        # Initialize prompts and attention mechanisms
+        self._initialize_prompts(ctx_dim, vis_dim, dtype)
+        self._initialize_attention_mechanisms(ctx_dim, vis_dim)
+        self._initialize_knowledge_proxies(ctx_dim, vis_dim, dtype)
+        self._initialize_postprocess_mlps(ctx_dim, vis_dim)
+        
+        # Initialize text prompts with ensembling
+        self._initialize_text_prompts(cfg, classnames, attack_types, artifact_types, clip_model, dtype)
+
+    def _initialize_prompts(self, ctx_dim, vis_dim, dtype):
+        """Initialize text and visual prompts."""
+        ctx_vectors = torch.empty(self.n_ctx, ctx_dim, dtype=dtype)
+        nn.init.normal_(ctx_vectors, std=0.02)
+        self.ctx = nn.Parameter(ctx_vectors)
+        # Create prompts for each layer
+        self.cross_prompts_text = nn.ParameterList(
+            [self.ctx] + [nn.Parameter(torch.empty(self.n_ctx, ctx_dim, dtype=dtype)) for _ in range(self.prompt_depth - 1)]
+        )
+        for p in self.cross_prompts_text[1:]:
+            nn.init.normal_(p, std=0.02)
+        
+        self.cross_prompts_visual = nn.ParameterList(
+            [nn.Parameter(torch.empty(self.n_ctx, vis_dim, dtype=dtype)) for _ in range(self.prompt_depth)]
+        )
+        for p in self.cross_prompts_visual:
+            nn.init.normal_(p, std=0.02)
+
+    def _initialize_attention_mechanisms(self, ctx_dim, vis_dim):
+        """Initialize attention mechanisms for cross-modal interaction."""
+        # Text -> Vision (All Layers) - only one attention mechanism needed
+        self.t2v = CrossPromptAttention(vis_dim, ctx_dim, num_attention_heads=8)
+
+    def _initialize_knowledge_proxies(self, ctx_dim, vis_dim, dtype):
+        """Initialize Layer-specific Knowledge Proxies (LKP)."""
+        # Only text proxies needed for T→V guidance across all layers
+        self.lkp_t = _get_clones(AttentionPooling(ctx_dim, 8), self.prompt_depth)
+
+        # Proxy tokens to act as queries in LKP
+        self.t_proxy = nn.ParameterList([nn.Parameter(torch.randn(1, ctx_dim, dtype=dtype)) for _ in range(self.prompt_depth)])
+
+    def _initialize_postprocess_mlps(self, ctx_dim, vis_dim):
+        """Initialize MLP post-processing modules for LKP."""
+        # Only text postprocess MLPs needed for T→V guidance
+        self.text_postprocess_mlp = nn.ModuleList([
+            FeaturePreprocessMLP(ctx_dim) for _ in range(self.prompt_depth)
+        ])
+
+    def _create_template_ensemble(self, templates, prompt_prefix, clip_model, dtype):
+        """Create ensemble embedding from multiple templates."""
+        template_embeddings = []
+        with torch.no_grad():
+            for template in templates:
+                prompt = f"{prompt_prefix} {template}."
+                tokenized = clip.tokenize(prompt)
+                embedding = clip_model.token_embedding(tokenized).type(dtype)
+                template_embeddings.append(embedding)
+            
+            # Average all template embeddings
+            ensemble_embedding = torch.mean(torch.stack(template_embeddings), dim=0)
+        return ensemble_embedding
+
+    def _replace_prompt_embeddings(self, original_embedding, class_mappings, ensemble_mappings):
+        """Replace prompt embeddings based on class and ensemble mappings."""
+        embedding = original_embedding.clone()
+        
+        for i, class_name in enumerate(class_mappings):
+            for key, ensemble_emb in ensemble_mappings.items():
+                if key.lower() in class_name.lower():
+                    # Replace suffix tokens with ensemble embeddings
+                    embedding[i, 1+self.n_ctx:] = ensemble_emb[0, 1+self.n_ctx:]
+                    break
+        
+        return embedding
+
+    def _initialize_text_prompts(self, cfg, classnames, attack_types, artifact_types, clip_model, dtype):
+        """Initialize text prompts with template ensembling for multiple classification tasks."""
+        # --- Tokenization for Text Encoder (Multiple Classification Tasks) ---
+        prompt_prefix = " ".join(["X"] * self.n_ctx)
+        
+        # === Binary Classification ===
+        prompts_binary = [f"{prompt_prefix} {name}." for name in classnames]
+        tokenized_prompts_binary = torch.cat([clip.tokenize(p) for p in prompts_binary])
+
+        # Create template ensembles for binary classification
+        binary_real_ensemble = self._create_template_ensemble(
+            FLIP_real_templates, prompt_prefix, clip_model, dtype)
+        binary_spoof_ensemble = self._create_template_ensemble(
+            FLIP_spoof_templates, prompt_prefix, clip_model, dtype)
+
+        # Create binary embeddings with ensemble replacement
+        with torch.no_grad():
+            embedding_binary_original = clip_model.token_embedding(tokenized_prompts_binary).type(dtype)
+        
+        binary_ensemble_mappings = {
+            'real': binary_real_ensemble,
+            'spoof': binary_spoof_ensemble
+        }
+        embedding_binary = self._replace_prompt_embeddings(
+            embedding_binary_original, classnames, binary_ensemble_mappings)
+
+        # === Attack Type Classification ===
+        prompts_attack = [f"{prompt_prefix} {name}." for name in attack_types]
+        tokenized_prompts_attack = torch.cat([clip.tokenize(p) for p in prompts_attack])
+        
+        # Create template ensembles for attack classification
+        real_ensemble = self._create_template_ensemble(
+            TeG_DG_real_templates, prompt_prefix, clip_model, dtype)
+        print_ensemble = self._create_template_ensemble(
+            TeG_DG_print_templates, prompt_prefix, clip_model, dtype)
+        replay_ensemble = self._create_template_ensemble(
+            TeG_DG_replay_templates, prompt_prefix, clip_model, dtype)
+
+        # Create attack embeddings with ensemble replacement
+        with torch.no_grad():
+            embedding_attack_original = clip_model.token_embedding(tokenized_prompts_attack).type(dtype)
+        
+        attack_ensemble_mappings = {
+            'real': real_ensemble,
+            'print': print_ensemble,
+            'replay': replay_ensemble
+        }
+        embedding_attack = self._replace_prompt_embeddings(
+            embedding_attack_original, attack_types, attack_ensemble_mappings)
+
+        # === Artifact Type Classification ===
+        prompts_artifact = [f"{prompt_prefix} {name}." for name in artifact_types]
+        tokenized_prompts_artifact = torch.cat([clip.tokenize(p) for p in prompts_artifact])
+        
+        with torch.no_grad():
+            embedding_artifact = clip_model.token_embedding(tokenized_prompts_artifact).type(dtype)
+
+        # === Register Buffers ===
+        # Binary classification
+        self.register_buffer('token_prefix_binary', embedding_binary[:, :1, :])
+        self.register_buffer('token_suffix_binary', embedding_binary[:, 1 + self.n_ctx:, :])
+        self.tokenized_prompts_binary = tokenized_prompts_binary
+        
+        # Attack classification
+        self.register_buffer('token_prefix_attack', embedding_attack[:, :1, :])
+        self.register_buffer('token_suffix_attack', embedding_attack[:, 1 + self.n_ctx:, :])
+        self.tokenized_prompts_attack = tokenized_prompts_attack
+        
+        # Artifact classification
+        self.register_buffer('token_prefix_artifact', embedding_artifact[:, :1, :])
+        self.register_buffer('token_suffix_artifact', embedding_artifact[:, 1 + self.n_ctx:, :])
+        self.tokenized_prompts_artifact = tokenized_prompts_artifact
+
+    def construct_prompts(self, ctx, prefix, suffix, n_cls):
+        if ctx.dim() == 2:
+            ctx = ctx.unsqueeze(0).expand(n_cls, -1, -1)
+        return torch.cat([prefix, ctx, suffix], dim=1)
+
+    def forward(self):
+        # --- Unidirectional Text → Vision Guidance (All Layers) ---
+        
+        # Extract text proxies from all layers using LKP
+        proxy_t_tokens = []
+        for i in range(self.prompt_depth):
+            # Apply LKP first, then post-process with MLP
+            proxy = self.lkp_t[i](self.t_proxy[i], self.cross_prompts_text[i], self.cross_prompts_text[i])
+            proxy = self.text_postprocess_mlp[i](proxy)
+            proxy_t_tokens.append(proxy)
+        
+        # Stack all text proxies
+        proxy_t_all = torch.cat(proxy_t_tokens, dim=0)
+        
+        # Stack all visual prompts
+        visual_prompts_all = torch.cat([p.unsqueeze(0) for p in self.cross_prompts_visual], dim=0)
+        
+        # Update all visual prompts using text guidance
+        updated_visual_all = self.t2v(visual_prompts_all.flatten(0, 1), proxy_t_all, proxy_t_all)
+        updated_visual_all = updated_visual_all.view(self.prompt_depth, self.n_ctx, -1)
+        
+        # Update all visual prompt parameters
+        for i in range(self.prompt_depth):
+            self.cross_prompts_visual[i].data.copy_(updated_visual_all[i])
+
+        # Text prompts remain unchanged (no V→T guidance)
+        # This tests if V→T guidance is necessary at all
+
+        # --- Prepare outputs for CLIP encoders (Multiple Tasks) ---
+        # Binary classification prompts
+        text_input_prompts_binary = self.construct_prompts(
+            self.cross_prompts_text[0], 
+            self.token_prefix_binary, 
+            self.token_suffix_binary,
+            self.n_cls_binary
+        )
+        
+        # Attack classification prompts
+        text_input_prompts_attack = self.construct_prompts(
+            self.cross_prompts_text[0], 
+            self.token_prefix_attack, 
+            self.token_suffix_attack,
+            self.n_cls_attack
+        )
+        
+        # Artifact classification prompts
+        text_input_prompts_artifact = self.construct_prompts(
+            self.cross_prompts_text[0], 
+            self.token_prefix_artifact, 
+            self.token_suffix_artifact,
+            self.n_cls_artifact
+        )
+        
+        # Prompts for deeper layers
+        deep_text_prompts = [p for p in self.cross_prompts_text[1:]]
+        deep_visual_prompts = [p for p in self.cross_prompts_visual[1:]]
+        
+        return (text_input_prompts_binary, text_input_prompts_attack, text_input_prompts_artifact,
+                self.cross_prompts_visual[0], deep_text_prompts, deep_visual_prompts,
+                self.tokenized_prompts_binary, self.tokenized_prompts_attack, self.tokenized_prompts_artifact)
+
+
+# =================================================================================
+# Main Model
+# =================================================================================
+
+class UniBiFAS_Model(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.clip_model = LoadClip(cfg)
+        self.prompt_learner = HierarchicalPromptLearner(cfg, self.clip_model)
+        self.image_encoder = self.clip_model.visual
+        self.text_encoder = TextEncoder(self.clip_model)
+        self.logit_scale = self.clip_model.logit_scale
+
+        # Projection layer for patch tokens to match text feature dimension
+        # Vision features: 768, Text features: 512
+        self.patch_projection = ProjectionMLP(768, 512)
+
+        # CLS projection: For uni_TI, only use final layer (high-level)
+        self.final_cls_projection = ProjectionMLP(768, 512)
+        
+        # Define interaction layers for patch token extraction
+        # For uni_TI: only extract from final layer for segmentation
+        self.final_layer = cfg['model']['prompt_depth'] - 1  # 11 for ViT-B/16
+        # We only need the final layer for CLS token
+        self.interaction_layers = [self.final_layer]
+        
+        # Store intermediate features during forward pass
+        self.patch_tokens_cache = {}
+        self.cls_tokens_cache = {}
+        
+        # Register hooks to extract patch tokens from specific layers
+        self._register_hooks()
+        
+        # Freeze CLIP encoders
+        for name, param in self.clip_model.named_parameters():
+            param.requires_grad_(False)
+    
+    def _register_hooks(self):
+        """Register forward hooks to extract patch tokens from specific layers."""
+        
+        def make_hook(layer_idx):
+            def hook(module, input, output):
+                
+                # --- The Fix ---
+                # The output is a list; the feature tensor is the first element.
+                feature_tensor = None
+                if isinstance(output, list) and output:
+                    feature_tensor = output[0]
+                elif isinstance(output, torch.Tensor):
+                    feature_tensor = output
+                # --- End of Fix ---
+
+                # Now, proceed with the extracted tensor
+                if feature_tensor is not None and isinstance(feature_tensor, torch.Tensor) and len(feature_tensor.shape) == 3:
+                    # Store patch tokens: skip CLS token (1st) and prompt tokens (last 4)
+                    # feature_tensor shape: [seq_len, batch_size, hidden_dim] = [201, batch, 768]
+                    # We want: [197, batch, 768] -> [1:197] (skip CLS, keep patches, skip prompts)
+                    num_prompt_tokens = self.cfg['model']['n_ctx']  # 4
+                    end_idx = feature_tensor.shape[0] - num_prompt_tokens  # 201 - 4 = 197
+                    patch_only = feature_tensor[1:end_idx, :, :]  # [196, batch, 768] 
+                    self.patch_tokens_cache[layer_idx] = patch_only.permute(1, 0, 2)  # [batch, 196, 768]
+                    self.cls_tokens_cache[layer_idx] = feature_tensor[0, :, :].unsqueeze(1)  # [batch, 1, 768]
+                # IMPORTANT: Always return the original, unmodified output
+                return output
+            
+            return hook
+        
+        # For uni_TI, only register hook for final layer
+        target_layers = self.interaction_layers  # Just [11]
+        for layer_idx in target_layers:
+            if hasattr(self.clip_model.visual, 'transformer') and hasattr(self.clip_model.visual.transformer, 'resblocks'):
+                if layer_idx < len(self.clip_model.visual.transformer.resblocks):
+                    self.clip_model.visual.transformer.resblocks[layer_idx].register_forward_hook(make_hook(layer_idx))
+            
+    def forward(self, image):
+        # Clear previous cache
+        self.patch_tokens_cache = {}
+        self.cls_tokens_cache = {}
+
+        # Get the updated, cross-modally refined prompts for multiple tasks
+        (text_prompts_binary, text_prompts_attack, text_prompts_artifact,
+         shallow_v_prompt, deep_t_prompts, deep_v_prompts,
+         tokenized_binary, tokenized_attack, tokenized_artifact) = self.prompt_learner()
+
+        # Forward pass through CLIP vision encoder (this will trigger our hooks)
+        image_features = self.image_encoder(image, shallow_v_prompt, deep_v_prompts)
+        
+        # Extract patch tokens from final layer only for uni_TI
+        target_layers = self.interaction_layers  # [11]
+        
+        patch_tokens_list = []
+        for layer_idx in target_layers:
+            if layer_idx in self.patch_tokens_cache:
+                patch_tokens_list.append(self.patch_tokens_cache[layer_idx])
+            else:
+                # Fallback: create dummy patch tokens if hook didn't work
+                print(f"Warning: Patch tokens not found from layer {layer_idx}. Using zeros.")
+                batch_size = image.shape[0]
+                num_patches = 196  # 14*14 for ViT-B/16 with 224x224 input
+                hidden_dim = 768   # ViT-B/16 hidden dimension
+                dummy_patches = torch.zeros(batch_size, num_patches, hidden_dim, 
+                                          device=image.device, dtype=image.dtype)
+                patch_tokens_list.append(dummy_patches)
+        
+        # Use patch tokens from final layer only
+        patch_tokens = patch_tokens_list[0] if len(patch_tokens_list) > 0 else torch.zeros(image.shape[0], 196, 768, device=image.device)
+
+        # Project patch tokens to match text feature dimension (768 -> 512)
+        patch_tokens = self.patch_projection(patch_tokens)
+
+        # Get cls token from final layer only (high-level)
+        cls_tokens_list = []
+        for layer_idx in target_layers:
+            if layer_idx in self.cls_tokens_cache:
+                cls_tokens_list.append(self.cls_tokens_cache[layer_idx])
+            else:
+                # Fallback: create dummy cls token if hook didn't work
+                print(f"Warning: CLS token not found from layer {layer_idx}. Using zeros.")
+                batch_size = image.shape[0]
+                hidden_dim = 768
+                dummy_cls = torch.zeros(batch_size, 1, hidden_dim, 
+                                       device=image.device, dtype=image.dtype)
+                cls_tokens_list.append(dummy_cls)
+
+        # Use only final layer CLS token (high-level)
+        cls_token_final = cls_tokens_list[0] if len(cls_tokens_list) > 0 else torch.zeros(image.shape[0], 1, 768, device=image.device)
+        
+        # Project and normalize the final CLS token
+        cls_token_projected = self.final_cls_projection(cls_token_final.squeeze(1))  # [batch, 512]
+        cls_token_projected = cls_token_projected / cls_token_projected.norm(dim=-1, keepdim=True)
+        
+        # Reshape to match expected format [batch, 1, 512] for compatibility
+        cls_tokens = cls_token_projected.unsqueeze(1)  # [batch, 1, 512]
+
+        # Get text features for different classification tasks
+        text_feat_b = self.text_encoder(text_prompts_binary, tokenized_binary, deep_t_prompts)
+        text_feat_a = self.text_encoder(text_prompts_attack, tokenized_attack, deep_t_prompts)
+        text_feat_art = self.text_encoder(text_prompts_artifact, tokenized_artifact, deep_t_prompts)
+        
+        # Normalize image features
+        img_feat_norm = image_features / image_features.norm(dim=-1, keepdim=True)
+        
+        # Normalize text features
+        text_feat_b = text_feat_b / text_feat_b.norm(dim=-1, keepdim=True)
+        text_feat_a = text_feat_a / text_feat_a.norm(dim=-1, keepdim=True)
+        text_feat_art = text_feat_art / text_feat_art.norm(dim=-1, keepdim=True)
+        
+        return img_feat_norm, cls_tokens, patch_tokens, text_feat_b, text_feat_a, text_feat_art

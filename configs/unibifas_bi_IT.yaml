@@ -36,11 +36,11 @@ transforms:
         - 0.242
 
 model:
-    mode: UniBiFAS 
+    mode: UniBiFAS_bi_IT  # bi_IT variant: V→T / T→V (no bidirectional middle layers)
     backbone: ViT-B/16
     n_ctx: 8                     # Number of learnable tokens per prompt
     prompt_depth: 12             # Max 12, Min 1 ,for 1 it will act as a shallow MaPLe (J = 1)
-    interaction_layers: [7, 10]   # Layers 0-3: V->T, 4-7: V<->T, 8-11: T->V
+    interaction_layers: [7]      # Single transition point: layers 0-6 V->T, layers 7-11 T->V
 
 train:
     epochs: 30                 # Number of epochs
@@ -74,14 +74,14 @@ scheduler:
 
 loss_weights:
     binary: 1.0
-    attack: 0.5
-    artifact: 0.5
+    attack: 0.0      # Disabled for simplified variant (no attack-level guidance)
+    artifact: 0.5    # Kept for artifact detection
     segmentation: 0.5
 
 inference_weights:
-    binary: 0.4
-    attack: 0.4
-    artifact: 0.2
+    binary: 0.6      # Binary + artifact combined
+    attack: 0.0      # Disabled
+    artifact: 0.4    # Artifact detection
 
 losses:
     cls_b:

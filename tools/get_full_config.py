@@ -19,22 +19,31 @@ def GetCfg():
     with open(cfgPath, 'r') as cfgFile:
         cfg = yaml.safe_load(cfgFile)
     
-    # Randomize config parameters if specified
-    if args_dict.get('randomize', False):
-        # Set seed before randomization for reproducibility
-        if args_dict.get('seed') is not None:
-            seed = args_dict['seed']
-        else:
-            # Generate a random seed if not provided
-            seed = random.randint(0, 2**32 - 1)
-        
+    # Set seed if provided (independent of randomization)
+    if args_dict.get('seed') is not None:
+        seed = args_dict['seed']
         # Set the seed for all random number generators
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            # For deterministic behavior (may impact performance)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
         # Store seed in config
         cfg['random_seed'] = seed
+    
+    # Randomize config parameters if specified
+    if args_dict.get('randomize', False):
+        # If seed not already set, generate a random one for randomization
+        if args_dict.get('seed') is None:
+            seed = random.randint(0, 2**32 - 1)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            cfg['random_seed'] = seed
         
         # Now randomize the config with the set seed
         cfg = randomize_config(cfg)

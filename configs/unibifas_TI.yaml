@@ -36,11 +36,11 @@ transforms:
         - 0.242
 
 model:
-    mode: UniBiFAS 
+    mode: UniBiFAS_TI  # TI variant: T→V / V↔T / V→T (inverted guidance direction)
     backbone: ViT-B/16
     n_ctx: 8                     # Number of learnable tokens per prompt
     prompt_depth: 12             # Max 12, Min 1 ,for 1 it will act as a shallow MaPLe (J = 1)
-    interaction_layers: [7, 10]   # Layers 0-3: V->T, 4-7: V<->T, 8-11: T->V
+    interaction_layers: [7, 10]   # Layers 0-3: T->V, 4-7: V<->T, 8-11: V->T
 
 train:
     epochs: 30                 # Number of epochs
