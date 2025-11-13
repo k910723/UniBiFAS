@@ -52,17 +52,20 @@ def save_checkpoint(save_list, is_best, model, optimizer, scheduler, filename = 
     valid_args = save_list[1]
     best_model_HTER = round(save_list[2], 5)
     best_model_ACC = save_list[3]
-    best_model_ACER = save_list[4]
+    best_model_AUC = save_list[4]
     threshold = save_list[5]
 
     state = {
         'epoch': epoch,
         'state_dict': model.state_dict(),
+        'model_state_dict': model.state_dict(),  # Add this for compatibility
         'scheduler': scheduler.state_dict(),
         'optimizer': optimizer.state_dict(),
         'valid_arg': valid_args,
-        'best_model_EER': best_model_HTER,
-        'best_model_ACER': best_model_ACER,
+        'best_HTER': best_model_HTER,
+        'best_model_EER': best_model_HTER,  # Keep for backward compatibility
+        'best_AUC': best_model_AUC,
+        'best_model_ACER': best_model_AUC,  # Keep for backward compatibility
         'best_model_ACC': best_model_ACC,
         'threshold': threshold
     }
