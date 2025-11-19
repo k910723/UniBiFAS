@@ -1,0 +1,101 @@
+base:
+  repeat_num: 1
+ckpt: null
+config: configs/unibifas.yaml
+dataset:
+  artifact_types:
+  - a face with realistic texture
+  - a face with bnhalftone artifact
+  - a face with distortion artifact
+  - a face with sfchalftone artifact
+  - a face with moire pattern artifact
+  - a face with reflection artifact
+  attack_types:
+  - a photo of a real face
+  - a photo of a print attack
+  - a photo of a replay attack
+  batch_size: 128
+  classnames:
+  - a photo of a real face
+  - a photo of a spoof face
+  num_workers: 8
+  root_path: /shared/shared/FAS_AUG
+  source: CIM
+  target: O
+  test_path: /shared/shared/
+device: cuda:0
+exp_name: UniBiFAS_CIM_O_20251114-162655_tsne
+inference_weights:
+  artifact: 0.2
+  attack: 0.4
+  binary: 0.4
+loss_weights:
+  artifact: 0.5
+  attack: 0.5
+  binary: 1.0
+  segmentation: 0.5
+losses:
+  cls_a:
+    name: CrossEntropyLoss
+    params:
+      reduction: mean
+  cls_art:
+    name: CrossEntropyLoss
+    params:
+      reduction: mean
+  cls_b:
+    name: CrossEntropyLoss
+    params:
+      reduction: mean
+  seg:
+    name: L1Loss
+    params:
+      reduction: mean
+model:
+  backbone: ViT-B/16
+  interaction_layers:
+  - 7
+  - 10
+  mode: UniBiFAS
+  n_ctx: 32
+  prompt_depth: 12
+now_time: 20251114-162655
+op_dir: ./op_dir
+optimizer:
+  name: Adam
+  params:
+    lr: 0.0001
+    weight_decay: 0.0001
+randomized: false
+save_ckpt: true
+scheduler:
+  params:
+    step_each_epoch: 100
+    total_epochs: 20
+    use: true
+    warmup: true
+    warmup_epochs: 3
+    warmup_factor: 0.01
+train:
+  amp: true
+  epochs: 20
+  print_interval: 1
+  save_path: output
+train_visual_prompt:
+  epochs: 100
+  lambda_artifact: 0.3
+  lambda_known: 0.5
+  lr: 0.01
+  save_path: output/visual_prompt.pth
+  temp: 0.2
+  weight_decay: 0.001
+transforms:
+  imgSize: 224
+  mean:
+  - 0.535
+  - 0.419
+  - 0.358
+  std:
+  - 0.276
+  - 0.251
+  - 0.242

@@ -116,7 +116,7 @@ if __name__ == '__main__':
     # VISUALIZATION CONTROL FLAGS - MODIFY THESE TO CHANGE VISUALIZATION BEHAVIOR
     # ==================================================================================
     INCLUDE_SOURCE = False  # Set to True to include source domain in visualization
-    FILTER_CORRECT_ONLY = True  # Set to True to only show correctly predicted samples
+    FILTER_CORRECT_ONLY = False  # Set to True to only show correctly predicted samples
     # ==================================================================================
     
     # Run t-SNE visualization with limited samples (500 per class)

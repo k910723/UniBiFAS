@@ -3,7 +3,7 @@ Script to run t-SNE visualization on an already trained model.
 Use this if you already have a trained model and just want to visualize.
 
 Usage:
-    python visualize_only.py --config configs/unibifas.yaml --ckpt output/c_i_best.pt
+    python visualize_only.py --config configs/unibifas.yaml --ckpt output/OCM_I_best.pt
 """
 
 import yaml
@@ -60,7 +60,7 @@ if __name__ == '__main__':
         raise ValueError("Please provide a checkpoint path using --ckpt argument")
     
     checkpoint_path = cfg['ckpt']
-    max_samples = cfg.get('max_samples', 700)  # Default 500 samples per class
+    max_samples = cfg.get('max_samples', 200)  # Default 500 samples per class
     
     # ==================================================================================
     # VISUALIZATION CONTROL FLAGS - MODIFY THESE TO CHANGE VISUALIZATION BEHAVIOR

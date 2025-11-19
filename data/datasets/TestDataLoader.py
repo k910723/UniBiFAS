@@ -138,16 +138,33 @@ class TestFASDataset(Dataset):
             # print(processed_img)
                         
             # Convert data type to uint8 if it's float
+            # FIXED: Properly handle any data range, especially [0, 0.004] case
             if processed_img.dtype == np.float32 or processed_img.dtype == np.float64:
-                # if processed_img.max() < 0.1:
-                #     processed_img *= 255.0  # Scale to [0, 1] if in [0, 0.0039]. For visualization only!!! Impact performance
-                # Assume values are in range [0,1] and scale to [0,255]
-                if processed_img.max() <= 1.0:
+                img_max = processed_img.max()
+                img_min = processed_img.min()
+                
+                '''if img_max < 0.1:
+                    # Data is in a very small range (e.g., [0, 0.004])
+                    # This is NOT [0,1] range - need to normalize properly
+                    # Normalize to [0, 1] first, then scale to [0, 255]
+                    if img_max - img_min > 1e-6:
+                        processed_img = (processed_img - img_min) / (img_max - img_min)
+                        processed_img = (processed_img * 255).astype(np.uint8)
+                    else:
+                        # All values are the same - create uniform gray image
+                        print(f"  Warning: Image at index {idx} has constant pixel values. Creating gray image.")
+                        processed_img = np.full_like(processed_img, 128, dtype=np.uint8)'''
+                if img_max <= 1.0:
+                    # Data is actually in [0, 1] range - scale to [0, 255]
                     processed_img = (processed_img * 255).astype(np.uint8)
                 else:
-                    # Values might already be in [0,255] range but stored as float
-                    # processed_img = np.clip(processed_img, 0, 255).astype(np.uint8)
-                    processed_img = (processed_img / 255).astype(np.uint8) # Performance improvement for DHU
+                    # Data is in [0, 255] or larger range
+                    if img_max > 255:
+                        # DHU case: values > 255, divide by 255
+                        processed_img = (processed_img / 255).astype(np.uint8)
+                    else:
+                        # Values already in [0, 255] range
+                        processed_img = np.clip(processed_img, 0, 255).astype(np.uint8)
             elif processed_img.dtype != np.uint8:
                 # Convert other integer types to uint8
                 processed_img = processed_img.astype(np.uint8)
