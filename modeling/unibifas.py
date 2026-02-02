@@ -176,6 +176,8 @@ class HierarchicalPromptLearner(nn.Module):
         # Initialize text prompts with ensembling
         self._initialize_text_prompts(cfg, classnames, attack_types, artifact_types, clip_model, dtype)
 
+        self.inference_mode = False
+
     def _initialize_prompts(self, ctx_dim, vis_dim, dtype):
         """Initialize text and visual prompts."""
         ctx_vectors = torch.empty(self.n_ctx, ctx_dim, dtype=dtype)
@@ -340,68 +342,68 @@ class HierarchicalPromptLearner(nn.Module):
     def forward(self):
         # --- Hierarchical Cross-Modal Interaction ---
 
-        # 1. Low Level: Vision -> Text (e.g., layers 0-3)
-        proxy_v_tokens = []
-        for i in range(self.low_level_layers):
-            # Apply LKP first, then post-process with MLP
-            proxy = self.lkp_v_low[i](self.v_proxy_low[i], self.cross_prompts_visual[i], self.cross_prompts_visual[i])
-            proxy = self.visual_postprocess_mlp_low[i](proxy)
-            proxy_v_tokens.append(proxy)
-        
-        proxy_v_low = torch.cat(proxy_v_tokens, dim=0)
-        text_prompts_low = torch.cat([p.unsqueeze(0) for p in self.cross_prompts_text[:self.low_level_layers]], dim=0)
-        
-        updated_text_low = self.v2t_low(text_prompts_low.flatten(0, 1), proxy_v_low, proxy_v_low)
-        updated_text_low = updated_text_low.view(self.low_level_layers, self.n_ctx, -1)
-        
-        for i in range(self.low_level_layers):
-            self.cross_prompts_text[i].data.copy_(updated_text_low[i])
-
-        # 2. Mid Level: Vision <-> Text (e.g., layers 4-7)
-        mid_range = range(self.low_level_layers, self.mid_level_layers)
-        
-        proxy_v_tokens_mid, proxy_t_tokens_mid = [], []
-        for i, layer_idx in enumerate(mid_range):
-            # Apply LKP first, then post-process with MLPs
-            proxy_v = self.lkp_v_mid[i](self.v_proxy_mid[i], self.cross_prompts_visual[layer_idx], self.cross_prompts_visual[layer_idx])
-            proxy_v = self.visual_postprocess_mlp_mid[i](proxy_v)
-            proxy_v_tokens_mid.append(proxy_v)
+        if not self.inference_mode:
+            # 1. Low Level: Vision -> Text (e.g., layers 0-3)
+            proxy_v_tokens = []
+            for i in range(self.low_level_layers):
+                # Apply LKP first, then post-process with MLP
+                proxy = self.lkp_v_low[i](self.v_proxy_low[i], self.cross_prompts_visual[i], self.cross_prompts_visual[i])
+                proxy = self.visual_postprocess_mlp_low[i](proxy)
+                proxy_v_tokens.append(proxy)
             
-            proxy_t = self.lkp_t_mid[i](self.t_proxy_mid[i], self.cross_prompts_text[layer_idx], self.cross_prompts_text[layer_idx])
-            proxy_t = self.text_postprocess_mlp_mid[i](proxy_t)
-            proxy_t_tokens_mid.append(proxy_t)
-        
-        proxy_v_mid = torch.cat(proxy_v_tokens_mid, dim=0)
-        proxy_t_mid = torch.cat(proxy_t_tokens_mid, dim=0)
-        
-        text_prompts_mid = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in mid_range], dim=0)
-        visual_prompts_mid = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in mid_range], dim=0)
-        
-        # V -> T
-        updated_text_mid = self.v2t_mid(text_prompts_mid.flatten(0,1), proxy_v_mid, proxy_v_mid).view_as(text_prompts_mid)
-        # T -> V
-        updated_visual_mid = self.t2v_mid(visual_prompts_mid.flatten(0,1), proxy_t_mid, proxy_t_mid).view_as(visual_prompts_mid)
-
-        for i, layer_idx in enumerate(mid_range):
-            self.cross_prompts_text[layer_idx].data.copy_(updated_text_mid[i])
-            self.cross_prompts_visual[layer_idx].data.copy_(updated_visual_mid[i])
-
-        # 3. High Level: Text -> Vision (e.g., layers 8-11)
-        high_range = range(self.mid_level_layers, self.prompt_depth)
-        proxy_t_tokens_high = []
-        for i, layer_idx in enumerate(high_range):
-            # Apply LKP first, then post-process with MLP
-            proxy = self.lkp_t_high[i](self.t_proxy_high[i], self.cross_prompts_text[layer_idx], self.cross_prompts_text[layer_idx])
-            proxy = self.text_postprocess_mlp_high[i](proxy)
-            proxy_t_tokens_high.append(proxy)
+            proxy_v_low = torch.cat(proxy_v_tokens, dim=0)
+            text_prompts_low = torch.cat([p.unsqueeze(0) for p in self.cross_prompts_text[:self.low_level_layers]], dim=0)
             
-        proxy_t_high = torch.cat(proxy_t_tokens_high, dim=0)
-        visual_prompts_high = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in high_range], dim=0)
-        
-        updated_visual_high = self.t2v_high(visual_prompts_high.flatten(0,1), proxy_t_high, proxy_t_high).view_as(visual_prompts_high)
+            updated_text_low = self.v2t_low(text_prompts_low.flatten(0, 1), proxy_v_low, proxy_v_low)
+            updated_text_low = updated_text_low.view(self.low_level_layers, self.n_ctx, -1)
+            
+            for i in range(self.low_level_layers):
+                self.cross_prompts_text[i].data.copy_(updated_text_low[i])
 
-        for i, layer_idx in enumerate(high_range):
-            self.cross_prompts_visual[layer_idx].data.copy_(updated_visual_high[i])
+            # 2. Mid Level: Vision <-> Text (e.g., layers 4-7)
+            mid_range = range(self.low_level_layers, self.mid_level_layers)
+            proxy_v_tokens_mid, proxy_t_tokens_mid = [], []
+            for i, layer_idx in enumerate(mid_range):
+                # Apply LKP first, then post-process with MLPs
+                proxy_v = self.lkp_v_mid[i](self.v_proxy_mid[i], self.cross_prompts_visual[layer_idx], self.cross_prompts_visual[layer_idx])
+                proxy_v = self.visual_postprocess_mlp_mid[i](proxy_v)
+                proxy_v_tokens_mid.append(proxy_v)
+                
+                proxy_t = self.lkp_t_mid[i](self.t_proxy_mid[i], self.cross_prompts_text[layer_idx], self.cross_prompts_text[layer_idx])
+                proxy_t = self.text_postprocess_mlp_mid[i](proxy_t)
+                proxy_t_tokens_mid.append(proxy_t)
+            
+            proxy_v_mid = torch.cat(proxy_v_tokens_mid, dim=0)
+            proxy_t_mid = torch.cat(proxy_t_tokens_mid, dim=0)
+            
+            text_prompts_mid = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in mid_range], dim=0)
+            visual_prompts_mid = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in mid_range], dim=0)
+            
+            # V -> T
+            updated_text_mid = self.v2t_mid(text_prompts_mid.flatten(0,1), proxy_v_mid, proxy_v_mid).view_as(text_prompts_mid)
+            # T -> V
+            updated_visual_mid = self.t2v_mid(visual_prompts_mid.flatten(0,1), proxy_t_mid, proxy_t_mid).view_as(visual_prompts_mid)
+
+            for i, layer_idx in enumerate(mid_range):
+                self.cross_prompts_text[layer_idx].data.copy_(updated_text_mid[i])
+                self.cross_prompts_visual[layer_idx].data.copy_(updated_visual_mid[i])
+
+            # 3. High Level: Text -> Vision (e.g., layers 8-11)
+            high_range = range(self.mid_level_layers, self.prompt_depth)
+            proxy_t_tokens_high = []
+            for i, layer_idx in enumerate(high_range):
+                # Apply LKP first, then post-process with MLP
+                proxy = self.lkp_t_high[i](self.t_proxy_high[i], self.cross_prompts_text[layer_idx], self.cross_prompts_text[layer_idx])
+                proxy = self.text_postprocess_mlp_high[i](proxy)
+                proxy_t_tokens_high.append(proxy)
+                
+            proxy_t_high = torch.cat(proxy_t_tokens_high, dim=0)
+            visual_prompts_high = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in high_range], dim=0)
+            
+            updated_visual_high = self.t2v_high(visual_prompts_high.flatten(0,1), proxy_t_high, proxy_t_high).view_as(visual_prompts_high)
+
+            for i, layer_idx in enumerate(high_range):
+                self.cross_prompts_visual[layer_idx].data.copy_(updated_visual_high[i])
 
         # --- Prepare outputs for CLIP encoders (Multiple Tasks) ---
         # Binary classification prompts
@@ -514,6 +516,14 @@ class UniBiFAS_Model(nn.Module):
                 if layer_idx < len(self.image_encoder.transformer.resblocks):
                     self.image_encoder.transformer.resblocks[layer_idx].register_forward_hook(make_hook(layer_idx))
             
+    def enable_inference_mode(self):   
+        self.prompt_learner.inference_mode = True
+        # print("Inference mode enabled. Prompts cached, interactions will be skipped.")
+    
+    def disable_inference_mode(self):
+        self.prompt_learner.inference_mode = False
+        # print("Inference mode disabled. Dynamic prompt refinement re-enabled.")
+    
     def forward(self, image):
         # Clear previous cache
         self.patch_tokens_cache = {}
