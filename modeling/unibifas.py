@@ -445,11 +445,11 @@ class UniBiFAS_Model(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.clip_model = LoadClip(cfg)
-        self.prompt_learner = HierarchicalPromptLearner(cfg, self.clip_model)
-        self.image_encoder = self.clip_model.visual
-        self.text_encoder = TextEncoder(self.clip_model)
-        self.logit_scale = self.clip_model.logit_scale
+        clip_model = LoadClip(cfg)
+        self.prompt_learner = HierarchicalPromptLearner(cfg, clip_model)
+        self.image_encoder = clip_model.visual
+        self.text_encoder = TextEncoder(clip_model)
+        self.logit_scale = clip_model.logit_scale
 
         # Projection layer for patch tokens to match text feature dimension
         # Vision features: 768, Text features: 512
@@ -472,7 +472,10 @@ class UniBiFAS_Model(nn.Module):
         self._register_hooks()
         
         # Freeze CLIP encoders
-        for name, param in self.clip_model.named_parameters():
+        for name, param in self.image_encoder.named_parameters():
+            param.requires_grad_(False)
+
+        for name, param in self.text_encoder.named_parameters():
             param.requires_grad_(False)
     
     def _register_hooks(self):
@@ -507,9 +510,9 @@ class UniBiFAS_Model(nn.Module):
         
         target_layers = self.interaction_layers + [self.final_layer]
         for layer_idx in target_layers:
-            if hasattr(self.clip_model.visual, 'transformer') and hasattr(self.clip_model.visual.transformer, 'resblocks'):
-                if layer_idx < len(self.clip_model.visual.transformer.resblocks):
-                    self.clip_model.visual.transformer.resblocks[layer_idx].register_forward_hook(make_hook(layer_idx))
+            if hasattr(self.image_encoder, 'transformer') and hasattr(self.image_encoder.transformer, 'resblocks'):
+                if layer_idx < len(self.image_encoder.transformer.resblocks):
+                    self.image_encoder.transformer.resblocks[layer_idx].register_forward_hook(make_hook(layer_idx))
             
     def forward(self, image):
         # Clear previous cache
