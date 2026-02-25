@@ -52,11 +52,15 @@ def train(cfg, log):
         #print("Trainable parameters should only be in the HierarchicalPromptLearner.")
 
         criterion = {
-            'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b']['params']),
-            'cls_a': getattr(torch.nn, cfg['losses']['cls_a']['name'])(**cfg['losses']['cls_a']['params']),
-            'cls_art': getattr(torch.nn, cfg['losses']['cls_art']['name'])(**cfg['losses']['cls_art']['params']),
-            'seg': getattr(torch.nn, cfg['losses']['seg']['name'])(**cfg['losses']['seg']['params'])
+            'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b'].get('params', {})),
+            'cls_a': getattr(torch.nn, cfg['losses']['cls_a']['name'])(**cfg['losses']['cls_a'].get('params', {})),
+            'cls_art': getattr(torch.nn, cfg['losses']['cls_art']['name'])(**cfg['losses']['cls_art'].get('params', {})),
+            'seg': getattr(torch.nn, cfg['losses']['seg']['name'])(**cfg['losses']['seg'].get('params', {}))
         }
+        
+        # Add entropy loss if configured
+        if 'entropy' in cfg['losses']:
+            criterion['entropy'] = getattr(losses, cfg['losses']['entropy']['name'])(**cfg['losses']['entropy'].get('params', {}))
 
         optimizer = make_optimizer(cfg, model, log)
         scheduler = create_lr_scheduler(optimizer, **cfg['scheduler']['params'])
@@ -116,11 +120,15 @@ def train(cfg, log):
         #print("Trainable parameters should only be in the HierarchicalPromptLearner.")
 
         criterion = {
-            'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b']['params']),
-            'cls_a': getattr(torch.nn, cfg['losses']['cls_a']['name'])(**cfg['losses']['cls_a']['params']),
-            'cls_art': getattr(torch.nn, cfg['losses']['cls_art']['name'])(**cfg['losses']['cls_art']['params']),
-            'seg': getattr(torch.nn, cfg['losses']['seg']['name'])(**cfg['losses']['seg']['params'])
+            'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b'].get('params', {})),
+            'cls_a': getattr(torch.nn, cfg['losses']['cls_a']['name'])(**cfg['losses']['cls_a'].get('params', {})),
+            'cls_art': getattr(torch.nn, cfg['losses']['cls_art']['name'])(**cfg['losses']['cls_art'].get('params', {})),
+            'seg': getattr(torch.nn, cfg['losses']['seg']['name'])(**cfg['losses']['seg'].get('params', {}))
         }
+        
+        # Add entropy loss if configured
+        if 'entropy' in cfg['losses']:
+            criterion['entropy'] = getattr(losses, cfg['losses']['entropy']['name'])(**cfg['losses']['entropy'].get('params', {}))
 
         optimizer = make_optimizer(cfg, model, log)
         scheduler = create_lr_scheduler(optimizer, **cfg['scheduler']['params'])

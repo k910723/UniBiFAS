@@ -6,7 +6,7 @@ dataset:
     test_path: '/shared/shared/'
     source: 'c'    # c, i, o, m, ci, ..., cio, ..., ciom
     target: 'i'    # c, i, o, m, ci, ..., cio, ..., ciom
-    batch_size: 32
+    batch_size: 64
     num_workers: 8
     classnames:
         - 'a photo of a real face'
@@ -40,8 +40,8 @@ model:
     backbone: ViT-B/16
     n_ctx: 
         type: randint
-        min: 2
-        max: 8                      # Number of learnable tokens per prompt (random between 2-8)
+        min: 8
+        max: 32                      # Number of learnable tokens per prompt (random between 2-8)
     prompt_depth: 12                # Max 12, Min 1 (random between 6-12)
     interaction_layers:
         type: interaction_layers    # Special handler for interaction layers

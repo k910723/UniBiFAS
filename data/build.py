@@ -49,12 +49,40 @@ def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, isFineTune=False, 
 
         all_datasets = []
         print(f"Training dataset root path: {cfg['dataset']['root_path']}")
+        
+        # Check if we should load actual spoof data
+        actual_spoof_base = cfg['dataset'].get('actual_spoof_dir', None)
+        
+        # Mapping from dataset names to .npy file prefixes
+        dataset_to_npy_prefix = {
+            'Oulu': 'Oulu',
+            'Casia': 'casia',
+            'Msu': 'MSU',
+            'Idiap': 'replay',  # Idiap is stored as 'replay'
+            'Celeb': None,
+            'partial': None
+        }
+        
         for datasetType in datasetTypes:
             dataset_path = os.path.join(cfg['dataset']['root_path'], datasetType)
 
             if not os.path.isdir(dataset_path):
                 print(f"Warning: Directory not found for '{datasetType}' at '{dataset_path}'. Skipping.")
                 continue
+
+            # Determine actual spoof path for this specific dataset
+            actual_spoof_path = None
+            if actual_spoof_base and cfg['dataset'].get('load_actual_spoof', False):
+                npy_prefix = dataset_to_npy_prefix.get(datasetType)
+                if npy_prefix:
+                    # Check if the .npy files exist
+                    spoof_file = os.path.join(actual_spoof_base, f"{npy_prefix}_images_spoof.npy")
+                    live_file = os.path.join(actual_spoof_base, f"{npy_prefix}_images_live.npy")
+                    if os.path.exists(spoof_file) and os.path.exists(live_file):
+                        actual_spoof_path = actual_spoof_base
+                        print(f"  Loading actual spoof data from: {spoof_file} and {live_file}")
+                    else:
+                        print(f"  Warning: Actual spoof .npy files not found for '{datasetType}' (prefix: {npy_prefix})")
 
             dataset = HierarchicalFasDataset(
                 root_dir=dataset_path,
@@ -63,6 +91,8 @@ def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, isFineTune=False, 
                 # live_only=isTrainVisualPrompt,
                 finetune=isFineTune,
                 visual_prompt_path=cfg['train_visual_prompt']['save_path'] if isFineTune else None,
+                actual_spoof_dir=actual_spoof_path,  # Path to .npy files
+                actual_spoof_dataset_name=dataset_to_npy_prefix.get(datasetType),  # Pass the prefix for .npy files
             )
             all_datasets.append(dataset)
             print(f"Loaded '{datasetType}' with {len(dataset)} total samples.")

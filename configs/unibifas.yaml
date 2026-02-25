@@ -6,8 +6,13 @@ dataset:
     test_path: '/shared/shared/'
     source: 'c'    # c, i, o, m, ci, ..., cio, ..., ciom
     target: 'i'    # c, i, o, m, ci, ..., cio, ..., ciom
-    batch_size: 128
+    batch_size: 256
     num_workers: 8
+    # Optional: path to actual spoof dataset for two-class training
+    # Actual spoofs will only contribute to binary (high-level) loss, not attack/artifact/segmentation
+    # Supports both .npy files and image directories
+    actual_spoof_dir: '/shared/shared/domain-generalization'  # Base directory for actual spoof .npy files
+    load_actual_spoof: true  # Set to true to enable loading actual spoof data alongside augmented data
     classnames:
         - 'a photo of a real face'
         - 'a photo of a spoof face'
@@ -38,7 +43,7 @@ transforms:
 model:
     mode: UniBiFAS 
     backbone: ViT-B/16
-    n_ctx: 8                     # Number of learnable tokens per prompt
+    n_ctx: 32                     # Number of learnable tokens per prompt
     prompt_depth: 12             # Max 12, Min 1 ,for 1 it will act as a shallow MaPLe (J = 1)
     interaction_layers: [7, 10]   # Layers 0-3: V->T, 4-7: V<->T, 8-11: T->V
 
@@ -98,6 +103,4 @@ losses:
             reduction: mean
     seg:
         name: L1Loss
-        params:
-            reduction: mean
         

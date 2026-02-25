@@ -70,8 +70,18 @@ def run(
         binary_classifier_top1.reset()
         
         # Iterate through the entire dataset (one epoch)
-        for batch_idx, (img, scm, labels) in enumerate(train_loader):
-            img, scm, labels = img.to(device), scm.to(device), labels.to(device)
+        for batch_idx, batch_data in enumerate(train_loader):
+            # Handle both old (3 values) and new (4 values) return formats
+            if len(batch_data) == 4:
+                img, scm, labels, is_actual_spoof = batch_data
+                img, scm, labels = img.to(device), scm.to(device), labels.to(device)
+                is_actual_spoof = is_actual_spoof.to(device)
+            else:
+                # Backward compatibility: old dataloader returns 3 values
+                img, scm, labels = batch_data
+                img, scm, labels = img.to(device), scm.to(device), labels.to(device)
+                is_actual_spoof = torch.zeros(img.size(0), dtype=torch.bool, device=device)
+            
             # Rescale scm to [0, 1]
             scm = (scm - scm.min()) / (scm.max() - scm.min() + 1e-8)
             
@@ -79,6 +89,10 @@ def run(
             binary_labels = labels[:, 0]
             attack_labels = labels[:, 1]
             artifact_labels = labels[:, 2]
+            
+            # Identify augmented spoofs (have full hierarchy) vs actual spoofs (only binary)
+            augmented_spoof_indices = ((binary_labels == 1) & (~is_actual_spoof)).nonzero(as_tuple=True)[0]
+            actual_spoof_indices = ((binary_labels == 1) & is_actual_spoof).nonzero(as_tuple=True)[0]
 
             # --- Forward Pass ---
             with torch.amp.autocast("cuda", enabled=scaler is not None):
@@ -93,13 +107,27 @@ def run(
                 logits_attack = logit_scale * cls_tokens[:,1,:] @ text_feat_a.t()
                 logits_artifact = logit_scale * cls_tokens[:,0,:] @ text_feat_art.t()
 
+                # Binary loss: applied to all samples (real, augmented spoof, actual spoof)
                 loss_binary = criterion['cls_b'](logits_binary, binary_labels)
-                loss_attack = criterion['cls_a'](logits_attack, attack_labels)
-                loss_artifact = criterion['cls_art'](logits_artifact, artifact_labels)
+                
+                # Attack and artifact losses: only for augmented spoofs (exclude actual spoofs)
+                # Actual spoofs don't have attack/artifact ground truth
+                if len(augmented_spoof_indices) > 0:
+                    loss_attack = criterion['cls_a'](
+                        logits_attack[augmented_spoof_indices], 
+                        attack_labels[augmented_spoof_indices]
+                    )
+                    loss_artifact = criterion['cls_art'](
+                        logits_artifact[augmented_spoof_indices], 
+                        artifact_labels[augmented_spoof_indices]
+                    )
+                else:
+                    loss_attack = torch.tensor(0.0, device=device)
+                    loss_artifact = torch.tensor(0.0, device=device)
 
                 # --- 2. Segmentation Loss Calculation ---
-                # Create zero maps for real images and use SCM for fake images
-                fake_indices = (binary_labels == 1).nonzero(as_tuple=True)[0]
+                # Create zero maps for real images and use SCM for augmented fake images
+                # Actual spoofs don't have SCM ground truth, so exclude them
                 loss_seg = torch.tensor(0.0, device=device)
 
                 if len(patch_tokens) > 0:  # Process all images
@@ -123,12 +151,13 @@ def run(
                     # Upsample the predicted map to match the SCM size
                     pred_map_upsampled = F.interpolate(pred_map, size=scm.shape[-2:], mode='bilinear', align_corners=False)
 
-                    # Create target maps: zero maps for real images, SCM for fake images
+                    # Create target maps: zero maps for real images, SCM for augmented fake images only
+                    # Actual spoofs don't have SCM, so they get zero target (no supervision)
                     target_maps = torch.zeros_like(scm)
-                    if len(fake_indices) > 0:
-                        target_maps[fake_indices] = scm[fake_indices]
+                    if len(augmented_spoof_indices) > 0:
+                        target_maps[augmented_spoof_indices] = scm[augmented_spoof_indices]
 
-                    # Calculate segmentation loss for all images
+                    # Calculate segmentation loss for all images (actual spoofs will have zero target)
                     loss_seg = criterion['seg'](pred_map_upsampled, target_maps)
 
                 # --- 3. Total Loss ---

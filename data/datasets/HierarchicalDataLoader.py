@@ -1,5 +1,6 @@
 import os
 import torch
+import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
@@ -7,12 +8,14 @@ from pathlib import Path
 
 class HierarchicalFasDataset(Dataset):
     """
-    A unified PyTorch Dataset for Face Anti-Spoofing that supports three modes:
+    A unified PyTorch Dataset for Face Anti-Spoofing that supports four modes:
     1.  **Standard Mode:** Loads real, fake, and SCM images for pre-training.
     2.  **Stage 1 (live_only=True):** Loads only real images with a zero tensor for SCM,
         used for training the visual prompt.
     3.  **Stage 2 (finetune=True):** Loads each real image twice: once as a clean 'real'
         sample and once as a 'spoof' sample blended with a visual prompt.
+    4.  **Two-Class Mode (actual_spoof_dir):** Loads augmented spoofs with full hierarchy
+        and actual spoof data (e.g., OCIM/OULU) for high-level binary classification only.
 
     Custom PyTorch Dataset for Face Anti-Spoofing with a hierarchical label structure.
     Parses a directory structure like:
@@ -34,11 +37,11 @@ class HierarchicalFasDataset(Dataset):
                     - image0.png
         - SCM/ (mirrors the structure of 'fake')
     
-    For a fake image: (fake_image_tensor, scm_image_tensor, labels_tensor)
-    For a real image: (real_image_tensor, zero_tensor, labels_tensor)
+    For a fake image: (fake_image_tensor, scm_image_tensor, labels_tensor, is_actual_spoof_flag)
+    For a real image: (real_image_tensor, zero_tensor, labels_tensor, is_actual_spoof_flag)
     """
 
-    def __init__(self, root_dir, transform=None, scm_transform=None, live_only=False, finetune=False, visual_prompt_path=None):
+    def __init__(self, root_dir, transform=None, scm_transform=None, live_only=False, finetune=False, visual_prompt_path=None, actual_spoof_dir=None, actual_spoof_dataset_name=None):
         """
         Args:
             root_dir (string): Directory for a specific dataset (e.g., '.../data/OULU').
@@ -47,12 +50,17 @@ class HierarchicalFasDataset(Dataset):
             live_only (bool): If True, only loads real images (for Stage 1).
             finetune_mode (bool): If True, activates Stage 2 fine-tuning behavior.
             visual_prompt_path (string, optional): Path to visual_prompt.pth for Stage 2.
+            actual_spoof_dir (string, optional): Path to directory containing .npy files or image folders
+                                                 for actual spoof data (e.g., OULU-NPU).
+            actual_spoof_dataset_name (string, optional): Prefix for .npy files (e.g., 'Oulu', 'casia', 'MSU', 'replay')
         """
         self.root_dir = Path(root_dir)
         self.transform = transform
         self.scm_transform = scm_transform if scm_transform is not None else transform
         self.live_only = live_only
         self.finetune = finetune
+        self.actual_spoof_dir = Path(actual_spoof_dir) if actual_spoof_dir else None
+        self.actual_spoof_dataset_name = actual_spoof_dataset_name
         
         # --- Define the label mappings for each tier ---
         # High-Level (Binary): Real vs. Fake
@@ -86,6 +94,9 @@ class HierarchicalFasDataset(Dataset):
         self.samples = []
         image_extensions = ['.png', '.jpg', '.jpeg']
         
+        # Track counts for reporting
+        augmented_count = 0
+        
         # We only scan `real` and `fake` dirs to build our sample list.
         # The SCM path will be derived on-the-fly.
         for folder in scan_folders:
@@ -97,15 +108,52 @@ class HierarchicalFasDataset(Dataset):
                 for image_path in scan_path.rglob(f'*{ext}'):
                     if self.finetune:
                         labels = (self.binary_map['real'], self.attack_map['real'], self.artifact_map['real'])
-                        self.samples.append((image_path, labels))  # Clean real sample
+                        self.samples.append((image_path, labels, False))  # Clean real sample, not actual spoof
                         labels = (self.binary_map['fake'], self.attack_map['unseen'], self.artifact_map['unseen'])
-                        self.samples.append((image_path, labels))  # Dummy labels for finetune
+                        self.samples.append((image_path, labels, False))  # Dummy labels for finetune, not actual spoof
+                        augmented_count += 2
                     else:
                         # The path relative to the dataset root (e.g., OULU/fake/print/img.png)
                         relative_path = image_path.relative_to(self.root_dir)
                         labels = self._parse_path_for_labels(relative_path.parts)
                         if labels is not None:
-                            self.samples.append((image_path, labels))
+                            self.samples.append((image_path, labels, False))  # False = not actual spoof (augmented)
+                            augmented_count += 1
+        
+        print(f"  Loaded {augmented_count} augmented samples")
+        
+        # --- Load actual spoof data if provided ---
+        # Supports two formats:
+        # 1. Directory with image folders (real/fake/spoof)
+        # 2. NumPy .npy files (e.g., Oulu_images_live.npy, Oulu_images_spoof.npy)
+        if self.actual_spoof_dir and self.actual_spoof_dir.exists() and not self.live_only and self.actual_spoof_dataset_name:
+            # Format 2: Load from specific .npy files for this dataset
+            spoof_file = self.actual_spoof_dir / f"{self.actual_spoof_dataset_name}_images_spoof.npy"
+            live_file = self.actual_spoof_dir / f"{self.actual_spoof_dataset_name}_images_live.npy"
+            
+            if spoof_file.exists() and live_file.exists():
+                # Load actual spoof data
+                try:
+                    spoof_data = np.load(str(spoof_file))
+                    live_data = np.load(str(live_file))
+                    actual_spoof_count = len(spoof_data)
+                    actual_live_count = len(live_data)
+                    print(f"  Loaded {actual_spoof_count} actual spoof and {actual_live_count} actual live samples from .npy files")
+                    
+                    # Add spoof samples
+                    labels_spoof = (self.binary_map['fake'], self.attack_map['unseen'], self.artifact_map['unseen'])
+                    for idx in range(len(spoof_data)):
+                        self.samples.append((spoof_file, labels_spoof, True, 'npy', idx))  # True = actual spoof
+                    
+                    # Add live samples
+                    labels_live = (self.binary_map['real'], self.attack_map['real'], self.artifact_map['real'])
+                    for idx in range(len(live_data)):
+                        self.samples.append((live_file, labels_live, False, 'npy', idx))  # False = not actual spoof
+                        
+                except Exception as e:
+                    print(f"  Error loading .npy files: {e}")
+            else:
+                print(f"  Warning: .npy files not found: {spoof_file.name}, {live_file.name}")
 
     def _parse_path_for_labels(self, path_parts):
         """
@@ -141,21 +189,61 @@ class HierarchicalFasDataset(Dataset):
         Fetches a sample and its corresponding SCM (or a zero placeholder for real images).
         
         Returns:
-            tuple: (primary_image, scm_image, labels_tensor)
+            tuple: (primary_image, scm_image, labels_tensor, is_actual_spoof)
+                   is_actual_spoof=True means this is actual spoof data without SCM/hierarchical labels
         """
-        image_path, labels = self.samples[idx]
+        sample_data = self.samples[idx]
         
-        # Load the primary image (real or fake)
-        try:
-            primary_image = Image.open(image_path).convert('RGB')
-        except (IOError, OSError) as e:
-            print(f"Warning: Could not read image {image_path}. Skipping. Error: {e}")
-            return self.__getitem__((idx + 1) % len(self))
+        # Determine format: (path, labels, is_actual_spoof) or (path, labels, is_actual_spoof, format) or (path, labels, is_actual_spoof, format, npy_idx)
+        if len(sample_data) >= 5:
+            # NumPy file format with index
+            npy_path, labels, is_actual_spoof, fmt, npy_idx = sample_data
+            # Load the specific image from the numpy array
+            try:
+                data = np.load(str(npy_path), mmap_mode='r')  # Use memory mapping for efficiency
+                image_array = data[npy_idx]
+                # Convert numpy array to PIL Image using min-max normalization
+                # This handles cases where data was incorrectly divided by 255
+                if image_array.dtype == np.float32 or image_array.dtype == np.float64:
+                    # Apply min-max normalization to [0, 255]
+                    min_val = image_array.min()
+                    max_val = image_array.max()
+                    if max_val > min_val:  # Avoid division by zero
+                        image_array = ((image_array - min_val) / (max_val - min_val) * 255).astype(np.uint8)
+                    else:
+                        image_array = np.zeros_like(image_array, dtype=np.uint8)
+                primary_image = Image.fromarray(image_array)
+            except Exception as e:
+                print(f"Warning: Could not read numpy array at index {npy_idx} from {npy_path}. Error: {e}")
+                return self.__getitem__((idx + 1) % len(self))
+        elif len(sample_data) == 4:
+            # This shouldn't happen after expansion, but handle it anyway
+            image_path, labels, is_actual_spoof, fmt = sample_data
+            if fmt == 'image':
+                try:
+                    primary_image = Image.open(image_path).convert('RGB')
+                except (IOError, OSError) as e:
+                    print(f"Warning: Could not read image {image_path}. Error: {e}")
+                    return self.__getitem__((idx + 1) % len(self))
+            else:
+                print(f"Warning: Unexpected format {fmt} without index")
+                return self.__getitem__((idx + 1) % len(self))
+        else:
+            # Old format: (path, labels, is_actual_spoof)
+            image_path, labels, is_actual_spoof = sample_data
+            try:
+                primary_image = Image.open(image_path).convert('RGB')
+            except (IOError, OSError) as e:
+                print(f"Warning: Could not read image {image_path}. Error: {e}")
+                return self.__getitem__((idx + 1) % len(self))
 
         scm_image = None
         is_fake = (labels[0] == self.binary_map['fake'])
 
-        if is_fake and not self.finetune:
+        # Only load SCM for augmented spoofs (not actual spoofs) and only for image files
+        if is_fake and not self.finetune and not is_actual_spoof and len(sample_data) == 3:
+            # Only try to load SCM for image files (old format with 3 elements)
+            image_path = sample_data[0]
             # Construct the path to the corresponding SCM image
             # e.g., OULU/fake/print/img.png -> OULU/SCM/print/img.png
             relative_path_parts = image_path.relative_to(self.root_dir).parts
@@ -209,5 +297,5 @@ class HierarchicalFasDataset(Dataset):
             scm_image_tensor = torch.abs(primary_image_tensor - attack_image)
             primary_image_tensor = attack_image
 
-        
-        return primary_image_tensor, scm_image_tensor, labels_tensor
+        # Return flag indicating if this is actual spoof data
+        return primary_image_tensor, scm_image_tensor, labels_tensor, is_actual_spoof
