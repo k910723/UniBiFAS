@@ -15,11 +15,15 @@ def run(
     optimizer,
     scheduler,
     scaler,
-    criterion, # Expecting a dict of loss functions: {'cls_b', 'cls_a', 'cls_art', 'seg'}
+    criterion, # Expecting a dict of loss functions: {'cls_b', 'cls_a', 'cls_art', 'seg'} or just {'cls_b'} for binary_only
     device,
     log,
     start_epoch
 ):
+    # --- Check protocol mode ---
+    protocol_mode = cfg.get('protocol', {}).get('mode', 'full')  # Default to 'full' for backward compatibility
+    is_binary_only = (protocol_mode == 'binary_only')
+    
     # --- For Tracking Best score ---
     best_ACC = 0.0
     best_HTER = 1.0
@@ -35,25 +39,45 @@ def run(
 
     log.write(f"{'-' * 55} [START {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {'-' * 55}\n\n", is_file=True)
     log.write(f"{'** Starting UniBiFAS Model Training! **':^149}\n", is_file=True)
+    log.write(f"{'Protocol Mode: ' + protocol_mode.upper():^149}\n", is_file=True)
 
-    # --- Logging Header ---
-    message = (
-        f"|{'epoch':^7}|"
-        f"{' VALID ':-^24}|"
-        f"{' Train ':-^65}|"
-        f"{' Current Best ':-^24}|"
-        f"{'time':^13}|\n"
-    )
-    log.write(message, is_file=True)
-    message = (
-        f"|{'':^7}|"
-        f"{'loss':^6}{'top-1':^6}{'HTER':^6}{'AUC':^6}|"
-        f"{'lr':^10}{'L_bin':^9}{'L_atk':^9}{'L_art':^9}{'L_seg':^9}{'L_total':^10}{'top-1':^9}|"
-        f"{'top-1':^8}{'HTER':^8}{'AUC':^8}|"
-        f"{'':^13}|\n"
-    )
-    log.write(message, is_file=True)
-    log.write(f"|{'-' * 137}|\n", is_file=True)
+    # --- Logging Header (adjust based on protocol mode) ---
+    if is_binary_only:
+        message = (
+            f"|{'epoch':^7}|"
+            f"{' VALID ':-^24}|"
+            f"{' Train ':-^29}|"
+            f"{' Current Best ':-^24}|"
+            f"{'time':^13}|\n"
+        )
+        log.write(message, is_file=True)
+        message = (
+            f"|{'':^7}|"
+            f"{'loss':^6}{'top-1':^6}{'HTER':^6}{'AUC':^6}|"
+            f"{'lr':^10}{'L_bin':^9}{'top-1':^10}|"
+            f"{'top-1':^8}{'HTER':^8}{'AUC':^8}|"
+            f"{'':^13}|\n"
+        )
+        log.write(message, is_file=True)
+        log.write(f"|{'-' * 101}|\n", is_file=True)
+    else:
+        message = (
+            f"|{'epoch':^7}|"
+            f"{' VALID ':-^24}|"
+            f"{' Train ':-^65}|"
+            f"{' Current Best ':-^24}|"
+            f"{'time':^13}|\n"
+        )
+        log.write(message, is_file=True)
+        message = (
+            f"|{'':^7}|"
+            f"{'loss':^6}{'top-1':^6}{'HTER':^6}{'AUC':^6}|"
+            f"{'lr':^10}{'L_bin':^9}{'L_atk':^9}{'L_art':^9}{'L_seg':^9}{'L_total':^10}{'top-1':^9}|"
+            f"{'top-1':^8}{'HTER':^8}{'AUC':^8}|"
+            f"{'':^13}|\n"
+        )
+        log.write(message, is_file=True)
+        log.write(f"|{'-' * 137}|\n", is_file=True)
 
     # --- Training Loop ---
     start = timer()
@@ -98,73 +122,96 @@ def run(
             with torch.amp.autocast("cuda", enabled=scaler is not None):
                 # ASSUMPTION: The model now returns a tuple of features
                 outputs = model(img)
-                img_feat_norm, cls_tokens, patch_tokens, text_feat_b, text_feat_a, text_feat_art = outputs
                 
-                # --- 1. Hierarchical Classification Loss Calculation ---
-                logit_scale = model.logit_scale.exp()
-                
-                logits_binary = logit_scale * img_feat_norm @ text_feat_b.t()
-                logits_attack = logit_scale * cls_tokens[:,1,:] @ text_feat_a.t()
-                logits_artifact = logit_scale * cls_tokens[:,0,:] @ text_feat_art.t()
-
-                # Binary loss: applied to all samples (real, augmented spoof, actual spoof)
-                loss_binary = criterion['cls_b'](logits_binary, binary_labels)
-                
-                # Attack and artifact losses: only for augmented spoofs (exclude actual spoofs)
-                # Actual spoofs don't have attack/artifact ground truth
-                if len(augmented_spoof_indices) > 0:
-                    loss_attack = criterion['cls_a'](
-                        logits_attack[augmented_spoof_indices], 
-                        attack_labels[augmented_spoof_indices]
-                    )
-                    loss_artifact = criterion['cls_art'](
-                        logits_artifact[augmented_spoof_indices], 
-                        artifact_labels[augmented_spoof_indices]
-                    )
-                else:
+                if is_binary_only:
+                    # Binary-only protocol: only use image features and binary text features
+                    img_feat_norm = outputs[0]  # Normalized image features
+                    text_feat_b = outputs[3]     # Binary text features
+                    
+                    # Binary classification only
+                    logit_scale = model.logit_scale.exp()
+                    logits_binary = logit_scale * img_feat_norm @ text_feat_b.t()
+                    
+                    # Binary loss: applied to all samples
+                    loss_binary = criterion['cls_b'](logits_binary, binary_labels)
+                    
+                    # No other losses in binary_only mode
                     loss_attack = torch.tensor(0.0, device=device)
                     loss_artifact = torch.tensor(0.0, device=device)
-
-                # --- 2. Segmentation Loss Calculation ---
-                # Create zero maps for real images and use SCM for augmented fake images
-                # Actual spoofs don't have SCM ground truth, so exclude them
-                loss_seg = torch.tensor(0.0, device=device)
-
-                if len(patch_tokens) > 0:  # Process all images
-                    # Assume the "spoof" text feature is at index 1
-                    spoof_text_feat = text_feat_b[1].unsqueeze(0).unsqueeze(-1) # Shape: [1, D, 1]
-                    real_text_feat = text_feat_b[0].unsqueeze(0).unsqueeze(-1) # Shape: [1, D, 1]
+                    loss_seg = torch.tensor(0.0, device=device)
                     
-                    # Normalize patch tokens to calculate cosine similarity
-                    patch_tokens = patch_tokens / (patch_tokens.norm(dim=2, keepdim=True) + 1e-8)
+                    # Total loss is just binary loss
+                    total_loss = loss_binary
                     
-                    # Softmax over similarity to spoof and real text features
-                    similarity_to_spoof = patch_tokens @ spoof_text_feat  # [N, num_patches, 1]
-                    similarity_to_real = patch_tokens @ real_text_feat    # [N, num_patches, 1]
-                    similarity_map = torch.cat([similarity_to_real, similarity_to_spoof], dim=-1)  # [N, num_patches, 2]
-                    similarity_map = F.softmax(similarity_map, dim=-1)[:, :, 1:]  # Probability of being spoof
-
-                    # Reshape to a 2D map (assuming 14x14 patches for ViT-B/16)
-                    h = w = int(similarity_map.shape[1]**0.5)
-                    pred_map = similarity_map.squeeze(-1).view(len(binary_labels), 1, h, w)
+                else:
+                    # Full hierarchical protocol
+                    img_feat_norm, cls_tokens, patch_tokens, text_feat_b, text_feat_a, text_feat_art = outputs
                     
-                    # Upsample the predicted map to match the SCM size
-                    pred_map_upsampled = F.interpolate(pred_map, size=scm.shape[-2:], mode='bilinear', align_corners=False)
+                    # --- 1. Hierarchical Classification Loss Calculation ---
+                    logit_scale = model.logit_scale.exp()
+                    
+                    logits_binary = logit_scale * img_feat_norm @ text_feat_b.t()
+                    logits_attack = logit_scale * cls_tokens[:,1,:] @ text_feat_a.t()
+                    logits_artifact = logit_scale * cls_tokens[:,0,:] @ text_feat_art.t()
 
-                    # Create target maps: zero maps for real images, SCM for augmented fake images only
-                    # Actual spoofs don't have SCM, so they get zero target (no supervision)
-                    target_maps = torch.zeros_like(scm)
+                    # Binary loss: applied to all samples (real, augmented spoof, actual spoof)
+                    loss_binary = criterion['cls_b'](logits_binary, binary_labels)
+                    
+                    # Attack and artifact losses: only for augmented spoofs (exclude actual spoofs)
+                    # Actual spoofs don't have attack/artifact ground truth
                     if len(augmented_spoof_indices) > 0:
-                        target_maps[augmented_spoof_indices] = scm[augmented_spoof_indices]
+                        loss_attack = criterion['cls_a'](
+                            logits_attack[augmented_spoof_indices], 
+                            attack_labels[augmented_spoof_indices]
+                        )
+                        loss_artifact = criterion['cls_art'](
+                            logits_artifact[augmented_spoof_indices], 
+                            artifact_labels[augmented_spoof_indices]
+                        )
+                    else:
+                        loss_attack = torch.tensor(0.0, device=device)
+                        loss_artifact = torch.tensor(0.0, device=device)
 
-                    # Calculate segmentation loss for all images (actual spoofs will have zero target)
-                    loss_seg = criterion['seg'](pred_map_upsampled, target_maps)
+                    # --- 2. Segmentation Loss Calculation ---
+                    # Create zero maps for real images and use SCM for augmented fake images
+                    # Actual spoofs don't have SCM ground truth, so exclude them
+                    loss_seg = torch.tensor(0.0, device=device)
 
-                # --- 3. Total Loss ---
-                total_loss = (cfg['loss_weights']['binary'] * loss_binary +
-                              cfg['loss_weights']['attack'] * loss_attack +
-                              cfg['loss_weights']['artifact'] * loss_artifact +
-                              cfg['loss_weights']['segmentation'] * loss_seg)
+                    if len(patch_tokens) > 0:  # Process all images
+                        # Assume the "spoof" text feature is at index 1
+                        spoof_text_feat = text_feat_b[1].unsqueeze(0).unsqueeze(-1) # Shape: [1, D, 1]
+                        real_text_feat = text_feat_b[0].unsqueeze(0).unsqueeze(-1) # Shape: [1, D, 1]
+                        
+                        # Normalize patch tokens to calculate cosine similarity
+                        patch_tokens = patch_tokens / (patch_tokens.norm(dim=2, keepdim=True) + 1e-8)
+                        
+                        # Softmax over similarity to spoof and real text features
+                        similarity_to_spoof = patch_tokens @ spoof_text_feat  # [N, num_patches, 1]
+                        similarity_to_real = patch_tokens @ real_text_feat    # [N, num_patches, 1]
+                        similarity_map = torch.cat([similarity_to_real, similarity_to_spoof], dim=-1)  # [N, num_patches, 2]
+                        similarity_map = F.softmax(similarity_map, dim=-1)[:, :, 1:]  # Probability of being spoof
+
+                        # Reshape to a 2D map (assuming 14x14 patches for ViT-B/16)
+                        h = w = int(similarity_map.shape[1]**0.5)
+                        pred_map = similarity_map.squeeze(-1).view(len(binary_labels), 1, h, w)
+                        
+                        # Upsample the predicted map to match the SCM size
+                        pred_map_upsampled = F.interpolate(pred_map, size=scm.shape[-2:], mode='bilinear', align_corners=False)
+
+                        # Create target maps: zero maps for real images, SCM for augmented fake images only
+                        # Actual spoofs don't have SCM, so they get zero target (no supervision)
+                        target_maps = torch.zeros_like(scm)
+                        if len(augmented_spoof_indices) > 0:
+                            target_maps[augmented_spoof_indices] = scm[augmented_spoof_indices]
+
+                        # Calculate segmentation loss for all images (actual spoofs will have zero target)
+                        loss_seg = criterion['seg'](pred_map_upsampled, target_maps)
+
+                    # --- 3. Total Loss ---
+                    total_loss = (cfg['loss_weights']['binary'] * loss_binary +
+                                  cfg['loss_weights']['attack'] * loss_attack +
+                                  cfg['loss_weights']['artifact'] * loss_artifact +
+                                  cfg['loss_weights']['segmentation'] * loss_seg)
 
             # --- Backward Pass ---
             optimizer.zero_grad()
@@ -178,17 +225,23 @@ def run(
 
             # --- Update Meters & Logging ---
             lr = optimizer.param_groups[0]['lr']
-            # Store weighted losses to match what's used in total loss
-            weighted_loss_binary = cfg['loss_weights']['binary'] * loss_binary.item()
-            weighted_loss_attack = cfg['loss_weights']['attack'] * loss_attack.item()
-            weighted_loss_artifact = cfg['loss_weights']['artifact'] * loss_artifact.item()
-            weighted_loss_seg = cfg['loss_weights']['segmentation'] * loss_seg.item()
             
-            loss_binary_meter.update(weighted_loss_binary)
-            loss_attack_meter.update(weighted_loss_attack)
-            loss_artifact_meter.update(weighted_loss_artifact)
-            loss_seg_meter.update(weighted_loss_seg)
-            loss_total_meter.update(total_loss.item())
+            if is_binary_only:
+                # Binary-only mode: only track binary loss
+                loss_binary_meter.update(loss_binary.item())
+                loss_total_meter.update(total_loss.item())
+            else:
+                # Full mode: track all losses with weights
+                weighted_loss_binary = cfg['loss_weights']['binary'] * loss_binary.item()
+                weighted_loss_attack = cfg['loss_weights']['attack'] * loss_attack.item()
+                weighted_loss_artifact = cfg['loss_weights']['artifact'] * loss_artifact.item()
+                weighted_loss_seg = cfg['loss_weights']['segmentation'] * loss_seg.item()
+                
+                loss_binary_meter.update(weighted_loss_binary)
+                loss_attack_meter.update(weighted_loss_attack)
+                loss_artifact_meter.update(weighted_loss_artifact)
+                loss_seg_meter.update(weighted_loss_seg)
+                loss_total_meter.update(total_loss.item())
 
             acc = accuracy(logits_binary, binary_labels, topk=(1,))
             binary_classifier_top1.update(acc[0].item())
@@ -220,15 +273,28 @@ def run(
                 save_checkpoint(save_list, is_best, model, optimizer, scheduler, filename=f"{cfg['train']['save_path']}/{cfg['dataset']['source']}_{cfg['dataset']['target']}_best.pt")
 
             print('\r', end='', flush=True)
-            message = (
-                f"|{epoch:^7d}|"
-                f"{valid_args[0]:^6.2f}{valid_args[6]:^6.2f}{valid_args[3]*100:^6.2f}{valid_args[4]*100:^6.2f}|"
-                f"{lr:^10.6f}"
-                f"{loss_binary_meter.avg:^9.3f}{loss_attack_meter.avg:^9.3f}{loss_artifact_meter.avg:^9.3f}"
-                f"{loss_seg_meter.avg:^9.3f}{loss_total_meter.avg:^10.3f}{binary_classifier_top1.avg:^9.2f}|"
-                f"{float(best_ACC):^8.2f}{float(best_HTER*100):^8.2f}{float(best_AUC*100):^8.2f}|"
-                f"{time_to_str(timer() - start, 'sec'):^12}|\n"
-            )
+            
+            if is_binary_only:
+                # Simplified logging for binary-only mode
+                message = (
+                    f"|{epoch:^7d}|"
+                    f"{valid_args[0]:^6.2f}{valid_args[6]:^6.2f}{valid_args[3]*100:^6.2f}{valid_args[4]*100:^6.2f}|"
+                    f"{lr:^10.6f}"
+                    f"{loss_binary_meter.avg:^9.3f}{binary_classifier_top1.avg:^10.2f}|"
+                    f"{float(best_ACC):^8.2f}{float(best_HTER*100):^8.2f}{float(best_AUC*100):^8.2f}|"
+                    f"{time_to_str(timer() - start, 'sec'):^12}|\n"
+                )
+            else:
+                # Full logging with all losses
+                message = (
+                    f"|{epoch:^7d}|"
+                    f"{valid_args[0]:^6.2f}{valid_args[6]:^6.2f}{valid_args[3]*100:^6.2f}{valid_args[4]*100:^6.2f}|"
+                    f"{lr:^10.6f}"
+                    f"{loss_binary_meter.avg:^9.3f}{loss_attack_meter.avg:^9.3f}{loss_artifact_meter.avg:^9.3f}"
+                    f"{loss_seg_meter.avg:^9.3f}{loss_total_meter.avg:^10.3f}{binary_classifier_top1.avg:^9.2f}|"
+                    f"{float(best_ACC):^8.2f}{float(best_HTER*100):^8.2f}{float(best_AUC*100):^8.2f}|"
+                    f"{time_to_str(timer() - start, 'sec'):^12}|\n"
+                )
             log.write(message, is_file=True)
             
         # Update scheduler at the end of each epoch

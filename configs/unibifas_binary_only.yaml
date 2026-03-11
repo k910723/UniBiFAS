@@ -1,0 +1,76 @@
+base:
+    repeat_num: 1
+
+dataset:
+    root_path: '/shared/shared/FAS_AUG'  # Augmented data from FAS_AUG
+    test_path: '/shared/shared/'
+    source: 'S'    # F=CeFA, S=SURF, W=WMCA (F avoids conflict with Casia)
+    target: 'W'   # Test on CeFA
+    batch_size: 256
+    num_workers: 8
+    # For F/S/W datasets:
+    # - Augmented data comes from /shared/shared/FAS_AUG/{CeFA,SURF,WMCA}
+    # - Actual spoof data comes from /shared/shared/domain-generalization-multi/{CeFA,SURF,WMCA}
+    actual_spoof_dir: '/shared/shared/domain-generalization-multi'  # Base directory for F/S/W actual spoof images
+    load_actual_spoof: False  # Set to true to enable loading actual spoof data alongside augmented data
+    classnames:
+        - 'a photo of a real face'
+        - 'a photo of a spoof face'
+
+transforms:
+    imgSize: 224
+    mean:
+        - 0.535
+        - 0.419
+        - 0.358
+    std:
+        - 0.276
+        - 0.251
+        - 0.242
+
+model:
+    mode: UniBiFAS 
+    backbone: ViT-B/16
+    n_ctx: 16                     # Number of learnable tokens per prompt
+    prompt_depth: 12             # Max 12, Min 1 ,for 1 it will act as a shallow MaPLe (J = 1)
+    interaction_layers: [7, 10]   # Layers 0-3: V->T, 4-7: V<->T, 8-11: T->V
+
+# Protocol configuration - binary_only uses only two-class cross-entropy
+protocol:
+    mode: binary_only  # Options: 'full' (all losses) or 'binary_only' (only binary CE loss)
+
+train:
+    epochs: 30                 # Number of epochs
+    print_interval: 1            # Print metrics every N epochs
+    amp: True
+    save_path: 'output'
+
+optimizer:
+  name: Adam
+  params:
+    lr: 1.0e-3                    # Increased from 2.5e-6 (40x higher)
+    weight_decay: 1.0e-4          # Increased regularization to prevent overfitting
+
+scheduler:
+    params:
+        use: False                  # Enable learning rate scheduling
+        step_each_epoch: 100
+        total_epochs: 30           # Match training epochs
+        warmup: True
+        warmup_epochs: 3           # Gradual warmup over 3 epochs
+        warmup_factor: 1.0e-2      # Start from lr * 0.01
+
+# Loss weights (only binary is used in binary_only mode)
+loss_weights:
+    binary: 1.0
+
+# Inference weights (only binary is used in binary_only mode)
+inference_weights:
+    binary: 1.0
+
+# Loss definitions (only cls_b is used in binary_only mode)
+losses:
+    cls_b:
+        name: CrossEntropyLoss
+        params:
+            reduction: mean

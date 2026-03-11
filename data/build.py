@@ -32,17 +32,20 @@ def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, isFineTune=False, 
         # --- TRAINING LOADER ---
         # Uses HierarchicalFasDataset for source domains
         print('\n--- Loading Source Domains for Training ---')
-        abbr2datasetType = {'o': 'Oulu', 'c': 'Casia', 'm': 'Msu', 'i': 'Idiap', 'b': 'Celeb', 'p' : 'partial'}
+        abbr2datasetType = {
+            'o': 'Oulu', 'c': 'Casia', 'm': 'Msu', 'i': 'Idiap', 'b': 'Celeb', 'p': 'partial',
+            'F': 'C', 'S': 'S', 'W': 'W'  # F/S/W map to actual directory names C/S/W
+        }
         #scm_transforms = FasTransforms(cfg, isTrain) # SCM transforms only needed for training
         
-        domain_keys = cfg['dataset']['source'].lower()
+        domain_keys = cfg['dataset']['source']  # Keep original case for C/S/W
 
         # Support both single-character codes ('OCI') and space-separated codes ('O C I')
         if ' ' in domain_keys:
-            # Space-separated: 'O C I' → ['o', 'c', 'i']
+            # Space-separated: 'O C I' or 'F S W' → ['O', 'C', 'I'] or ['F', 'S', 'W']
             key_list = domain_keys.split()
         else:
-            # Single string: 'OCI' → ['o', 'c', 'i'] 
+            # Single string: 'OCI' or 'FSW' → ['O', 'C', 'I'] or ['F', 'S', 'W']
             key_list = list(domain_keys)
         
         datasetTypes = [abbr2datasetType[key] for key in key_list]
@@ -53,14 +56,17 @@ def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, isFineTune=False, 
         # Check if we should load actual spoof data
         actual_spoof_base = cfg['dataset'].get('actual_spoof_dir', None)
         
-        # Mapping from dataset names to .npy file prefixes
+        # Mapping from dataset names to .npy file prefixes or directory names
         dataset_to_npy_prefix = {
             'Oulu': 'Oulu',
             'Casia': 'casia',
             'Msu': 'MSU',
             'Idiap': 'replay',  # Idiap is stored as 'replay'
             'Celeb': None,
-            'partial': None
+            'partial': None,
+            'C': 'CeFA',     # C/S/W directories map to CeFA/SURF/WMCA for actual spoof data
+            'S': 'SURF',
+            'W': 'WMCA'
         }
         
         for datasetType in datasetTypes:
@@ -75,14 +81,25 @@ def BuildLoader(cfg, isTrain=True, isTrainVisualPrompt=False, isFineTune=False, 
             if actual_spoof_base and cfg['dataset'].get('load_actual_spoof', False):
                 npy_prefix = dataset_to_npy_prefix.get(datasetType)
                 if npy_prefix:
-                    # Check if the .npy files exist
-                    spoof_file = os.path.join(actual_spoof_base, f"{npy_prefix}_images_spoof.npy")
-                    live_file = os.path.join(actual_spoof_base, f"{npy_prefix}_images_live.npy")
-                    if os.path.exists(spoof_file) and os.path.exists(live_file):
-                        actual_spoof_path = actual_spoof_base
-                        print(f"  Loading actual spoof data from: {spoof_file} and {live_file}")
+                    # Check if this is a F/S/W dataset (uses image directories)
+                    if datasetType in ['C', 'S', 'W']:
+                        # Check for image directory structure
+                        spoof_dir = os.path.join(actual_spoof_base, npy_prefix, 'spoof', 'profile')
+                        real_dir = os.path.join(actual_spoof_base, npy_prefix, 'real', 'profile')
+                        if os.path.exists(spoof_dir) and os.path.exists(real_dir):
+                            actual_spoof_path = actual_spoof_base
+                            print(f"  Loading actual spoof images from: {spoof_dir}")
+                        else:
+                            print(f"  Warning: Actual spoof image directories not found for '{datasetType}' at {actual_spoof_base}/{npy_prefix}")
                     else:
-                        print(f"  Warning: Actual spoof .npy files not found for '{datasetType}' (prefix: {npy_prefix})")
+                        # Check if the .npy files exist (for O/Ca/I/M datasets)
+                        spoof_file = os.path.join(actual_spoof_base, f"{npy_prefix}_images_spoof.npy")
+                        live_file = os.path.join(actual_spoof_base, f"{npy_prefix}_images_live.npy")
+                        if os.path.exists(spoof_file) and os.path.exists(live_file):
+                            actual_spoof_path = actual_spoof_base
+                            print(f"  Loading actual spoof data from: {spoof_file} and {live_file}")
+                        else:
+                            print(f"  Warning: Actual spoof .npy files not found for '{datasetType}' (prefix: {npy_prefix})")
 
             dataset = HierarchicalFasDataset(
                 root_dir=dataset_path,

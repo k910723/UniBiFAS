@@ -124,36 +124,67 @@ class HierarchicalFasDataset(Dataset):
         
         # --- Load actual spoof data if provided ---
         # Supports two formats:
-        # 1. Directory with image folders (real/fake/spoof)
-        # 2. NumPy .npy files (e.g., Oulu_images_live.npy, Oulu_images_spoof.npy)
+        # 1. Directory with image folders (real/spoof) - for F/S/W datasets (CeFA/SURF/WMCA)
+        # 2. NumPy .npy files (e.g., Oulu_images_live.npy, Oulu_images_spoof.npy) - for O/C/I/M datasets
         if self.actual_spoof_dir and self.actual_spoof_dir.exists() and not self.live_only and self.actual_spoof_dataset_name:
-            # Format 2: Load from specific .npy files for this dataset
-            spoof_file = self.actual_spoof_dir / f"{self.actual_spoof_dataset_name}_images_spoof.npy"
-            live_file = self.actual_spoof_dir / f"{self.actual_spoof_dataset_name}_images_live.npy"
+            # First check Format 1: Load from image directories (for C/S/W)
+            spoof_dir = self.actual_spoof_dir / self.actual_spoof_dataset_name / "spoof"
+            real_dir = self.actual_spoof_dir / self.actual_spoof_dataset_name / "real"
             
-            if spoof_file.exists() and live_file.exists():
-                # Load actual spoof data
-                try:
-                    spoof_data = np.load(str(spoof_file))
-                    live_data = np.load(str(live_file))
-                    actual_spoof_count = len(spoof_data)
-                    actual_live_count = len(live_data)
-                    print(f"  Loaded {actual_spoof_count} actual spoof and {actual_live_count} actual live samples from .npy files")
-                    
-                    # Add spoof samples
-                    labels_spoof = (self.binary_map['fake'], self.attack_map['unseen'], self.artifact_map['unseen'])
-                    for idx in range(len(spoof_data)):
-                        self.samples.append((spoof_file, labels_spoof, True, 'npy', idx))  # True = actual spoof
-                    
-                    # Add live samples
-                    labels_live = (self.binary_map['real'], self.attack_map['real'], self.artifact_map['real'])
-                    for idx in range(len(live_data)):
-                        self.samples.append((live_file, labels_live, False, 'npy', idx))  # False = not actual spoof
-                        
-                except Exception as e:
-                    print(f"  Error loading .npy files: {e}")
+            if spoof_dir.exists() and real_dir.exists():
+                # Load actual spoof data from image directories
+                actual_spoof_count = 0
+                actual_live_count = 0
+                print(f"  Loading actual spoof images from directories: {spoof_dir}")
+                
+                # Add spoof samples (only RGB/profile images)
+                labels_spoof = (self.binary_map['fake'], self.attack_map['unseen'], self.artifact_map['unseen'])
+                spoof_profile_dir = spoof_dir / "profile"
+                if spoof_profile_dir.exists():
+                    for ext in image_extensions:
+                        for image_path in spoof_profile_dir.rglob(f'*{ext}'):
+                            self.samples.append((image_path, labels_spoof, True))  # True = actual spoof
+                            actual_spoof_count += 1
+                
+                # Add live samples (only RGB/profile images)
+                labels_live = (self.binary_map['real'], self.attack_map['real'], self.artifact_map['real'])
+                real_profile_dir = real_dir / "profile"
+                if real_profile_dir.exists():
+                    for ext in image_extensions:
+                        for image_path in real_profile_dir.rglob(f'*{ext}'):
+                            self.samples.append((image_path, labels_live, False))  # False = not actual spoof (real)
+                            actual_live_count += 1
+                
+                print(f"  Loaded {actual_spoof_count} actual spoof and {actual_live_count} actual live samples from image directories")
+                
             else:
-                print(f"  Warning: .npy files not found: {spoof_file.name}, {live_file.name}")
+                # Format 2: Load from specific .npy files for this dataset (for O/Ca/I/M)
+                spoof_file = self.actual_spoof_dir / f"{self.actual_spoof_dataset_name}_images_spoof.npy"
+                live_file = self.actual_spoof_dir / f"{self.actual_spoof_dataset_name}_images_live.npy"
+                
+                if spoof_file.exists() and live_file.exists():
+                    # Load actual spoof data
+                    try:
+                        spoof_data = np.load(str(spoof_file))
+                        live_data = np.load(str(live_file))
+                        actual_spoof_count = len(spoof_data)
+                        actual_live_count = len(live_data)
+                        print(f"  Loaded {actual_spoof_count} actual spoof and {actual_live_count} actual live samples from .npy files")
+                        
+                        # Add spoof samples
+                        labels_spoof = (self.binary_map['fake'], self.attack_map['unseen'], self.artifact_map['unseen'])
+                        for idx in range(len(spoof_data)):
+                            self.samples.append((spoof_file, labels_spoof, True, 'npy', idx))  # True = actual spoof
+                        
+                        # Add live samples
+                        labels_live = (self.binary_map['real'], self.attack_map['real'], self.artifact_map['real'])
+                        for idx in range(len(live_data)):
+                            self.samples.append((live_file, labels_live, False, 'npy', idx))  # False = not actual spoof
+                            
+                    except Exception as e:
+                        print(f"  Error loading .npy files: {e}")
+                else:
+                    print(f"  Warning: Actual spoof data not found for '{self.actual_spoof_dataset_name}'")
 
     def _parse_path_for_labels(self, path_parts):
         """

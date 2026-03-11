@@ -40,19 +40,28 @@ class TestFASDataset(Dataset):
         self.live_only = live_only
         self.protocol_map = {
             'O': 'Oulu',
-            'C': 'casia',
+            'C': 'casia',  # Lowercase C for Casia (old dataset)
             'I': 'replay',
             'M': 'MSU',
             'D': '3DMAD',
             'H': 'HKBUv1+',
             'U': 'casia_3d',
-            'paper_glasses' : 'paper_glasses_RGB',
-            'mask_silicone' : 'mask_silicone_RGB',
-            'funny_eyes' : 'funny_eyes_RGB',
+            'paper_glasses': 'paper_glasses_RGB',
+            'mask_silicone': 'mask_silicone_RGB',
+            'funny_eyes': 'funny_eyes_RGB',
+            # New F/S/W datasets (F=CeFA, avoiding conflict with Casia)
+            'F': 'CeFA',
+            'CeFA': 'CeFA',  # Also support full name
+            'S': 'SURF',
+            'SURF': 'SURF',
+            'W': 'WMCA',
+            'WMCA': 'WMCA',
         }
 
         all_live_images = []
         all_spoof_images = []
+        # Track which samples are from image files vs numpy arrays
+        image_file_samples = []  # List of (image_path, label)
 
         # data_path = self.root_dir / 'domain-generalization'
 
@@ -62,7 +71,39 @@ class TestFASDataset(Dataset):
                 continue
             
             base_name = self.protocol_map[p]
-            if p == 'D' or p == 'H' or p == 'U':
+            
+            # Check if this is a F/S/W dataset (uses image directories)
+            if p in ['F', 'CeFA', 'S', 'SURF', 'W', 'WMCA']:
+                data_path = self.root_dir / 'domain-generalization-multi' / base_name
+                live_dir = data_path / 'real' / 'profile'
+                spoof_dir = data_path / 'spoof' / 'profile'
+                
+                # Load live images from directory
+                if live_dir.exists():
+                    live_count = 0
+                    for ext in ['.jpg', '.png', '.jpeg']:
+                        for img_path in live_dir.rglob(f'*{ext}'):
+                            image_file_samples.append((img_path, 0))  # 0 = live/real
+                            live_count += 1
+                    print(f"Loaded {live_count} live images from {live_dir}")
+                else:
+                    print(f"Warning: Directory not found at {live_dir}")
+                
+                # Load spoof images from directory
+                if spoof_dir.exists():
+                    spoof_count = 0
+                    for ext in ['.jpg', '.png', '.jpeg']:
+                        for img_path in spoof_dir.rglob(f'*{ext}'):
+                            image_file_samples.append((img_path, 1))  # 1 = spoof/fake
+                            spoof_count += 1
+                    print(f"Loaded {spoof_count} spoof images from {spoof_dir}")
+                else:
+                    print(f"Warning: Directory not found at {spoof_dir}")
+                
+                # Skip numpy file loading for F/S/W datasets
+                continue
+                
+            elif p == 'D' or p == 'H' or p == 'U':
                 data_path = self.root_dir / "3Dmask"
                 live_path = data_path / f"{base_name}_images_live.npy"
                 spoof_path = data_path / f"{base_name}_images_spoof.npy"
@@ -87,10 +128,14 @@ class TestFASDataset(Dataset):
             else:
                 print(f"Warning: File not found at {spoof_path}")
 
-        if not all_live_images and not all_spoof_images:
+        if not all_live_images and not all_spoof_images and not image_file_samples:
             raise RuntimeError("No data loaded. Check root_dir and protocol.")
 
-        # Concatenate all loaded images from the specified protocols
+        # Store image file samples separately
+        self.image_file_samples = image_file_samples
+        self.use_image_files = len(image_file_samples) > 0
+
+        # Concatenate all loaded images from the specified protocols (.npy files)
         live_images = np.concatenate(all_live_images, axis=0) if all_live_images else np.array([])
         spoof_images = np.concatenate(all_spoof_images, axis=0) if all_spoof_images else np.array([])
         
@@ -109,12 +154,18 @@ class TestFASDataset(Dataset):
         elif len(live_images) > 0:
             self.total_images = live_images
             self.total_labels = live_labels
-        else:
+        elif len(spoof_images) > 0:
             self.total_images = spoof_images
             self.total_labels = spoof_labels
+        else:
+            # All data is from image files
+            self.total_images = np.array([])
+            self.total_labels = np.array([])
 
 
     def __len__(self):
+        if self.use_image_files:
+            return len(self.image_file_samples) + len(self.total_images)
         return len(self.total_images)
 
     def __getitem__(self, idx):
@@ -125,41 +176,57 @@ class TestFASDataset(Dataset):
             tuple: (primary_image_tensor, dummy_scm_tensor, labels_tensor)
                    to maintain compatibility with the hierarchical dataloader.
         """
-        img_data = self.total_images[idx]
-        binary_label = self.total_labels[idx]
+        # Check if this index refers to an image file or numpy array
+        if self.use_image_files and idx < len(self.image_file_samples):
+            # Load from image file
+            img_path, binary_label = self.image_file_samples[idx]
+            try:
+                primary_image = Image.open(img_path).convert('RGB')
+            except Exception as e:
+                print(f"Error loading image {img_path}. Error: {e}")
+                # Fallback to the next item
+                return self.__getitem__((idx + 1) % len(self))
+        else:
+            # Load from numpy array
+            if self.use_image_files:
+                # Adjust index for numpy array portion
+                idx = idx - len(self.image_file_samples)
+            
+            img_data = self.total_images[idx]
+            binary_label = self.total_labels[idx]
 
-        # Convert numpy array to PIL Image with proper preprocessing
-        try:
-            # Handle problematic array shapes and data types
-            processed_img = img_data.copy()
-            
-            # Remove singleton dimensions (e.g., (1,1,3) -> (1,3) -> (3,))
-            processed_img = np.squeeze(processed_img)
-            # print(processed_img)
-                        
-            # Convert data type to uint8 if it's float
-            if processed_img.dtype == np.float32 or processed_img.dtype == np.float64:
-                # if processed_img.max() < 0.1:
-                #     processed_img *= 255.0  # Scale to [0, 1] if in [0, 0.0039]. For visualization only!!! Impact performance
-                # Assume values are in range [0,1] and scale to [0,255]
-                if processed_img.max() <= 1.0:
-                    processed_img = (processed_img * 255).astype(np.uint8)
-                else:
-                    # Values might already be in [0,255] range but stored as float
-                    # processed_img = np.clip(processed_img, 0, 255).astype(np.uint8)
-                    processed_img = (processed_img / 255).astype(np.uint8) # Performance improvement for DHU
-            elif processed_img.dtype != np.uint8:
-                # Convert other integer types to uint8
-                processed_img = processed_img.astype(np.uint8)
-            
-            primary_image = Image.fromarray(processed_img)
-            
-        except Exception as e:
-            print(f"Error converting numpy array to image at index {idx}. Error: {e}")
-            print(f"Original shape: {img_data.shape}, dtype: {img_data.dtype}")
-            print(f"Value range: [{img_data.min():.4f}, {img_data.max():.4f}]")
-            # Fallback to the next item in the dataset
-            return self.__getitem__((idx + 1) % len(self))
+            # Convert numpy array to PIL Image with proper preprocessing
+            try:
+                # Handle problematic array shapes and data types
+                processed_img = img_data.copy()
+                
+                # Remove singleton dimensions (e.g., (1,1,3) -> (1,3) -> (3,))
+                processed_img = np.squeeze(processed_img)
+                # print(processed_img)
+                            
+                # Convert data type to uint8 if it's float
+                if processed_img.dtype == np.float32 or processed_img.dtype == np.float64:
+                    if processed_img.max() < 0.1:
+                        processed_img *= 255.0  # Scale to [0, 1] if in [0, 0.0039]. For visualization only!!! Impact performance
+                    # Assume values are in range [0,1] and scale to [0,255]
+                    if processed_img.max() <= 1.0:
+                        processed_img = (processed_img * 255).astype(np.uint8)
+                    else:
+                        # Values might already be in [0,255] range but stored as float
+                        # processed_img = np.clip(processed_img, 0, 255).astype(np.uint8)
+                        processed_img = (processed_img / 255).astype(np.uint8) # Performance improvement for DHU
+                elif processed_img.dtype != np.uint8:
+                    # Convert other integer types to uint8
+                    processed_img = processed_img.astype(np.uint8)
+                
+                primary_image = Image.fromarray(processed_img)
+                
+            except Exception as e:
+                print(f"Error converting numpy array to image at index {idx}. Error: {e}")
+                print(f"Original shape: {img_data.shape}, dtype: {img_data.dtype}")
+                print(f"Value range: [{img_data.min():.4f}, {img_data.max():.4f}]")
+                # Fallback to the next item in the dataset
+                return self.__getitem__((idx + 1) % len(self))
 
         # Apply transformations to the image
         if self.transform:

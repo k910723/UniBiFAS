@@ -2,17 +2,17 @@ base:
     repeat_num: 1
 
 dataset:
-    root_path: '/shared/shared/FAS_AUG'
+    root_path: '/shared/shared/FAS_AUG'  # Augmented data from FAS_AUG
     test_path: '/shared/shared/'
-    source: 'c'    # c, i, o, m, ci, ..., cio, ..., ciom
-    target: 'i'    # c, i, o, m, ci, ..., cio, ..., ciom
+    source: 'S'    # F=CeFA, S=SURF, W=WMCA (F avoids conflict with Casia)
+    target: 'W'   # Test on CeFA
     batch_size: 256
     num_workers: 8
-    # Optional: path to actual spoof dataset for two-class training
-    # Actual spoofs will only contribute to binary (high-level) loss, not attack/artifact/segmentation
-    # Supports both .npy files and image directories
-    actual_spoof_dir: '/shared/shared/domain-generalization'  # Base directory for actual spoof .npy files
-    load_actual_spoof: true  # Set to true to enable loading actual spoof data alongside augmented data
+    # For F/S/W datasets:
+    # - Augmented data comes from /shared/shared/FAS_AUG/{CeFA,SURF,WMCA}
+    # - Actual spoof data comes from /shared/shared/domain-generalization-multi/{CeFA,SURF,WMCA}
+    actual_spoof_dir: '/shared/shared/domain-generalization-multi'  # Base directory for F/S/W actual spoof images
+    load_actual_spoof: False  # Set to true to enable loading actual spoof data alongside augmented data
     classnames:
         - 'a photo of a real face'
         - 'a photo of a spoof face'
@@ -65,7 +65,7 @@ train_visual_prompt:
 optimizer:
   name: Adam
   params:
-    lr: 1.0e-4                    # Increased from 2.5e-6 (40x higher)
+    lr: 1.0e-3                    # Increased from 2.5e-6 (40x higher)
     weight_decay: 1.0e-4          # Increased regularization to prevent overfitting
 
 scheduler:
@@ -81,12 +81,12 @@ loss_weights:
     binary: 1.0
     attack: 0.5
     artifact: 0.5
-    segmentation: 0
+    segmentation: 0.5
 
 inference_weights:
-    binary: 0.6
-    attack: 0.2
-    artifact: 0.2
+    binary: 0.4
+    attack: 0.3
+    artifact: 0.3
 
 losses:
     cls_b:
@@ -103,4 +103,3 @@ losses:
             reduction: mean
     seg:
         name: L1Loss
-        

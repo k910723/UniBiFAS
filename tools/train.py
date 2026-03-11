@@ -51,16 +51,28 @@ def train(cfg, log):
         print(f"Model created. Trainable parameters: {trainable_params / 1e6:.2f}M")
         #print("Trainable parameters should only be in the HierarchicalPromptLearner.")
 
-        criterion = {
-            'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b'].get('params', {})),
-            'cls_a': getattr(torch.nn, cfg['losses']['cls_a']['name'])(**cfg['losses']['cls_a'].get('params', {})),
-            'cls_art': getattr(torch.nn, cfg['losses']['cls_art']['name'])(**cfg['losses']['cls_art'].get('params', {})),
-            'seg': getattr(torch.nn, cfg['losses']['seg']['name'])(**cfg['losses']['seg'].get('params', {}))
-        }
+        # Check protocol mode to determine which losses to create
+        protocol_mode = cfg.get('protocol', {}).get('mode', 'full')  # Default to 'full'
         
-        # Add entropy loss if configured
-        if 'entropy' in cfg['losses']:
-            criterion['entropy'] = getattr(losses, cfg['losses']['entropy']['name'])(**cfg['losses']['entropy'].get('params', {}))
+        if protocol_mode == 'binary_only':
+            # Binary-only protocol: only create binary classification loss
+            criterion = {
+                'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b'].get('params', {}))
+            }
+            print("Using binary-only protocol: only binary cross-entropy loss will be used.")
+        else:
+            # Full hierarchical protocol: create all losses
+            criterion = {
+                'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b'].get('params', {})),
+                'cls_a': getattr(torch.nn, cfg['losses']['cls_a']['name'])(**cfg['losses']['cls_a'].get('params', {})),
+                'cls_art': getattr(torch.nn, cfg['losses']['cls_art']['name'])(**cfg['losses']['cls_art'].get('params', {})),
+                'seg': getattr(torch.nn, cfg['losses']['seg']['name'])(**cfg['losses']['seg'].get('params', {}))
+            }
+            
+            # Add entropy loss if configured
+            if 'entropy' in cfg['losses']:
+                criterion['entropy'] = getattr(losses, cfg['losses']['entropy']['name'])(**cfg['losses']['entropy'].get('params', {}))
+            print("Using full protocol: all hierarchical losses will be used.")
 
         optimizer = make_optimizer(cfg, model, log)
         scheduler = create_lr_scheduler(optimizer, **cfg['scheduler']['params'])
@@ -119,16 +131,28 @@ def train(cfg, log):
         print(f"Model created. Trainable parameters: {trainable_params / 1e6:.2f}M")
         #print("Trainable parameters should only be in the HierarchicalPromptLearner.")
 
-        criterion = {
-            'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b'].get('params', {})),
-            'cls_a': getattr(torch.nn, cfg['losses']['cls_a']['name'])(**cfg['losses']['cls_a'].get('params', {})),
-            'cls_art': getattr(torch.nn, cfg['losses']['cls_art']['name'])(**cfg['losses']['cls_art'].get('params', {})),
-            'seg': getattr(torch.nn, cfg['losses']['seg']['name'])(**cfg['losses']['seg'].get('params', {}))
-        }
+        # Check protocol mode to determine which losses to create
+        protocol_mode = cfg.get('protocol', {}).get('mode', 'full')  # Default to 'full'
         
-        # Add entropy loss if configured
-        if 'entropy' in cfg['losses']:
-            criterion['entropy'] = getattr(losses, cfg['losses']['entropy']['name'])(**cfg['losses']['entropy'].get('params', {}))
+        if protocol_mode == 'binary_only':
+            # Binary-only protocol: only create binary classification loss
+            criterion = {
+                'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b'].get('params', {}))
+            }
+            print("Using binary-only protocol: only binary cross-entropy loss will be used.")
+        else:
+            # Full hierarchical protocol: create all losses
+            criterion = {
+                'cls_b': getattr(torch.nn, cfg['losses']['cls_b']['name'])(**cfg['losses']['cls_b'].get('params', {})),
+                'cls_a': getattr(torch.nn, cfg['losses']['cls_a']['name'])(**cfg['losses']['cls_a'].get('params', {})),
+                'cls_art': getattr(torch.nn, cfg['losses']['cls_art']['name'])(**cfg['losses']['cls_art'].get('params', {})),
+                'seg': getattr(torch.nn, cfg['losses']['seg']['name'])(**cfg['losses']['seg'].get('params', {}))
+            }
+            
+            # Add entropy loss if configured
+            if 'entropy' in cfg['losses']:
+                criterion['entropy'] = getattr(losses, cfg['losses']['entropy']['name'])(**cfg['losses']['entropy'].get('params', {}))
+            print("Using full protocol: all hierarchical losses will be used.")
 
         optimizer = make_optimizer(cfg, model, log)
         scheduler = create_lr_scheduler(optimizer, **cfg['scheduler']['params'])
